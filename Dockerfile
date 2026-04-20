@@ -1,6 +1,6 @@
 # ========== DOSYA: Dockerfile (İlgili her repo için) ==========
 # 1. Derleme Aşaması
-FROM rust:1.75-slim-bookworm AS builder
+FROM rust:1.95-slim-bookworm AS builder
 
 # Sistem bağımlılıkları (Protobuf derleyicisi için şart)
 RUN apt-get update && apt-get install -y protobuf-compiler pkg-config libssl-dev
