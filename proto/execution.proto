@@ -1,20 +1,30 @@
-// ========== DOSYA: sentinel-spec/proto/execution.proto ==========
 syntax = "proto3";
-package sentinel.execution;
+package sentinel.execution.v1; // v1 eklendi (buf lint kuralı)
 
-// Inference modülünün Execution modülüne göndereceği kesin emir şeması
 message TradeSignal {
-    string symbol = 1;
-    enum SignalType {
-        HOLD = 0;
-        STRONG_BUY = 1;
-        BUY = 2;
-        SELL = 3;
-        STRONG_SELL = 4;
-    }
-    SignalType type = 2;
-    double confidence_score = 3;  // 0.0 ile 1.0 arası AI güven skoru
-    double recommended_leverage = 4; // Risk motoruna tavsiye edilen kaldıraç
-    int64 timestamp = 5;
-    string reason = 6; // Hangi geçmiş vektöre benzediği veya LLM kararı
+  string symbol = 1;
+  enum SignalType {
+    SIGNAL_TYPE_UNSPECIFIED = 0; // buf lint kuralı (Sıfırıncı değer UNSPECIFIED olmalı)
+    SIGNAL_TYPE_HOLD = 1;
+    SIGNAL_TYPE_STRONG_BUY = 2;
+    SIGNAL_TYPE_BUY = 3;
+    SIGNAL_TYPE_SELL = 4;
+    SIGNAL_TYPE_STRONG_SELL = 5;
+  }
+  SignalType type = 2;
+  double confidence_score = 3;
+  double recommended_leverage = 4;
+  int64 timestamp = 5;
+  string reason = 6;
+}
+
+// YENİ: Paper Trade sonuçlarını arşive (QuestDB) atmak için
+message ExecutionReport {
+  string symbol = 1;
+  string side = 2; // "BUY" or "SELL"
+  double execution_price = 3;
+  double quantity = 4;
+  double realized_pnl = 5; // Kâr/Zarar
+  double commission = 6; // Komisyon maliyeti
+  int64 timestamp = 7;
 }

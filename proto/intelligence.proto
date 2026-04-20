@@ -1,16 +1,16 @@
 // ========== DOSYA: sentinel-spec/proto/intelligence.proto ==========
 syntax = "proto3";
-package sentinel.intelligence;
+package sentinel.intelligence.v1; // v1 eklendi
 
 service SentimentAnalyzer {
-    // Metni gönder, skoru al
-    rpc AnalyzeText (SentimentRequest) returns (SentimentResponse);
+  // Metni gönder, skoru al
+  rpc AnalyzeText(SentimentRequest) returns (SentimentResponse);
 }
 
 message SentimentRequest {
-    string text = 1;
+  string text = 1;
 }
 
 message SentimentResponse {
-    double score = 1; // -1.0 ile 1.0 arası
+  double score = 1; // -1.0 ile 1.0 arası
 }
