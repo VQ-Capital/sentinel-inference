@@ -73,15 +73,25 @@ async fn main() -> Result<()> {
                         0.0
                     };
 
-                    let intel_request =
-                        tonic::Request::new(SentimentRequest { text: "BTC".into() });
+                    // 💡 YENİ: Fiyat hareketine göre Yapay Zekaya gönderilecek metni oluştur!
+                    let simulated_news = if price_velocity > 0.0001 {
+                        "Massive breakout seen, market looks highly bullish and ready to moon!"
+                    } else if price_velocity < -0.0001 {
+                        "Market faces heavy selloff, bearish trend indicates a crash and dump."
+                    } else {
+                        "Market is ranging near support, accumulation ongoing."
+                    };
+
+                    let intel_request = tonic::Request::new(SentimentRequest {
+                        text: simulated_news.into(),
+                    });
                     let sentiment_score = intel_client
                         .analyze_text(intel_request)
                         .await
                         .map(|r| r.into_inner().score)
                         .unwrap_or(0.0);
 
-                    // SİNYAL ÜRETİMİ (Grafana'da görebilmek için sürekli tetiklenecek)
+                    // SİNYAL ÜRETİMİ
                     let signal = if price_velocity >= 0.0 {
                         SignalType::Buy
                     } else {
