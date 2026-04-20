@@ -1,0 +1,3 @@
+[submodule "sentinel-spec"]
+	path = sentinel-spec
+	url = git@github.com:VQ-Capital/sentinel-spec.git
