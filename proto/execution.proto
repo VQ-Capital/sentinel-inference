@@ -1,0 +1,20 @@
+// ========== DOSYA: sentinel-spec/proto/execution.proto ==========
+syntax = "proto3";
+package sentinel.execution;
+
+// Inference modülünün Execution modülüne göndereceği kesin emir şeması
+message TradeSignal {
+    string symbol = 1;
+    enum SignalType {
+        HOLD = 0;
+        STRONG_BUY = 1;
+        BUY = 2;
+        SELL = 3;
+        STRONG_SELL = 4;
+    }
+    SignalType type = 2;
+    double confidence_score = 3;  // 0.0 ile 1.0 arası AI güven skoru
+    double recommended_leverage = 4; // Risk motoruna tavsiye edilen kaldıraç
+    int64 timestamp = 5;
+    string reason = 6; // Hangi geçmiş vektöre benzediği veya LLM kararı
+}

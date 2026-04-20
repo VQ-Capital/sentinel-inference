@@ -13,6 +13,8 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1.0"
 futures-util = "0.3"
+qdrant-client = "1.10"
+chrono = "0.4" # Zaman damgaları için eklendi
 
 [build-dependencies]
 prost-build = "0.12"

@@ -1,17 +1,25 @@
 // ========== DOSYA: sentinel-inference/src/main.rs ==========
-use anyhow::{Context, Result};
+use anyhow::{Result};
 use futures_util::StreamExt;
 use prost::Message;
 use std::collections::HashMap;
 use tokio::time::{self, Duration};
 use tracing::{info, error};
+use qdrant_client::Qdrant;
+use qdrant_client::qdrant::{SearchPointsBuilder};
+use chrono;
 
-pub mod sentinel_market {
-    include!(concat!(env!("OUT_DIR"), "/sentinel.market.rs"));
+pub mod sentinel_protos {
+    pub mod market {
+        include!(concat!(env!("OUT_DIR"), "/sentinel.market.rs"));
+    }
+    pub mod execution {
+        include!(concat!(env!("OUT_DIR"), "/sentinel.execution.rs"));
+    }
 }
-use sentinel_market::{AggTrade, MarketStateVector};
+use sentinel_protos::market::{AggTrade, MarketStateVector};
+use sentinel_protos::execution::{TradeSignal, trade_signal::SignalType};
 
-// Saniyelik verileri toplamak için geçici depo
 struct WindowStats {
     first_price: f64,
     last_price: f64,
@@ -23,89 +31,100 @@ struct WindowStats {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    info!("🧠 Sentinel-Inference (Aggregator) başlatılıyor...");
+    info!("🧠 Sentinel-Inference (Zeka) başlatılıyor...");
 
-    let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
-    let nats_client = async_nats::connect(&nats_url).await.context("NATS bağlantı hatası")?;
+    // 1. BAĞLANTILAR
+    let nats_url = "nats://localhost:4222";
+    let nats_client = async_nats::connect(nats_url).await?;
+    let qdrant_client = Qdrant::from_url("http://localhost:6334").build()?;
+    let collection_name = "market_states";
 
-    // NATS'tan ham trade verilerini dinle
     let mut subscriber = nats_client.subscribe("market.trade.binance.BTCUSDT").await?;
-    
-    // Sembol bazlı pencere istatistikleri
     let mut windows: HashMap<String, WindowStats> = HashMap::new();
-
-    // 1 saniyelik periyotlarla vektör üretimi için interval
     let mut ticker = time::interval(Duration::from_secs(1));
 
-    info!("📊 BTCUSDT trade akışı saniyelik pencerelerle işleniyor...");
+    info!("⚡ Canlı analiz ve benzerlik araması devrede...");
 
     loop {
         tokio::select! {
-            // A. NATS'tan yeni bir işlem geldiğinde
             Some(message) = subscriber.next() => {
                 if let Ok(trade) = AggTrade::decode(message.payload) {
                     let stats = windows.entry(trade.symbol.clone()).or_insert(WindowStats {
-                        first_price: trade.price,
-                        last_price: trade.price,
-                        buy_volume: 0.0,
-                        sell_volume: 0.0,
-                        trade_count: 0,
+                        first_price: trade.price, last_price: trade.price, buy_volume: 0.0, sell_volume: 0.0, trade_count: 0,
                     });
-
                     stats.last_price = trade.price;
                     stats.trade_count += 1;
-                    
-                    // Binance is_buyer_maker=true ise bu bir Taker Sell işlemidir.
-                    if trade.is_buyer_maker {
-                        stats.sell_volume += trade.quantity;
-                    } else {
-                        stats.buy_volume += trade.quantity;
-                    }
+                    if trade.is_buyer_maker { stats.sell_volume += trade.quantity; } else { stats.buy_volume += trade.quantity; }
                 }
             }
 
-            // B. 1 saniye dolduğunda (Vektörü hesapla ve NATS'a bas)
             _ = ticker.tick() => {
                 for (symbol, stats) in windows.iter_mut() {
                     if stats.trade_count == 0 { continue; }
 
-                    // 1. Fiyat Değişim Hızı (Velocity)
                     let price_velocity = (stats.last_price - stats.first_price) / stats.first_price;
-                    
-                    // 2. Alım/Satım Dengesi (Imbalance)
                     let total_vol = stats.buy_volume + stats.sell_volume;
-                    let volume_imbalance = if total_vol > 0.0 {
-                        (stats.buy_volume - stats.sell_volume) / total_vol
-                    } else { 0.0 };
+                    let volume_imbalance = if total_vol > 0.0 { (stats.buy_volume - stats.sell_volume) / total_vol } else { 0.0 };
 
-                    // 3. Vektörü oluştur (Protobuf)
-                    let state_vector = MarketStateVector {
+                    // Önce Durum Vektörünü NATS'a bas (Storage'ın Qdrant'a yazması için)
+                    let current_state = MarketStateVector {
                         symbol: symbol.clone(),
-                        window_start_time: 0, // Geliştirilebilir
+                        window_start_time: 0,
                         window_end_time: 0,
                         price_velocity,
                         volume_imbalance,
-                        sentiment_score: 0.0, // Burası C++ LLM'den gelecek
-                        embeddings: vec![price_velocity, volume_imbalance], // Qdrant araması için
+                        sentiment_score: 0.0,
+                        embeddings: vec![price_velocity, volume_imbalance],
                     };
+                    let mut state_buf = Vec::new();
+                    current_state.encode(&mut state_buf)?;
+                    let _ = nats_client.publish(format!("state.vector.{}", symbol), state_buf.into()).await;
 
-                    // 4. Vektörü NATS'a bas (state.vector.BTCUSDT)
-                    let mut buf = Vec::new();
-                    state_vector.encode(&mut buf)?;
-                    let subject = format!("state.vector.{}", symbol);
-                    
-                    if let Err(e) = nats_client.publish(subject, buf.into()).await {
-                        error!("Vektör Publish Hatası: {:?}", e);
-                    } else {
-                        info!("🚀 [VEKTÖR] {} | Velocity: {:.6} | Imbalance: {:.2}", 
-                            symbol, price_velocity, volume_imbalance);
+                    // 2. QDRANT'TA BENZERLİK ARAMASI
+                    let current_vector = vec![price_velocity as f32, volume_imbalance as f32];
+                    let mut signal = SignalType::Hold;
+                    let mut confidence = 0.0;
+
+                    let search_request = SearchPointsBuilder::new(collection_name, current_vector, 5)
+                        .with_payload(true);
+
+                    if let Ok(search_result) = qdrant_client.search_points(search_request).await {
+                        let points = search_result.result;
+                        if !points.is_empty() {
+                            let avg_past_velocity: f64 = points.iter()
+                                .filter_map(|p| p.payload.get("velocity"))
+                                .filter_map(|v| v.as_double())
+                                .sum::<f64>() / points.len() as f64;
+
+                            confidence = (avg_past_velocity.abs() * 10000.0).min(1.0);
+
+                            if avg_past_velocity > 0.00001 {
+                                signal = SignalType::Buy;
+                            } else if avg_past_velocity < -0.00001 {
+                                signal = SignalType::Sell;
+                            }
+                        }
                     }
 
-                    // Pencereyi sıfırla (Bir sonraki saniye için)
-                    stats.trade_count = 0;
-                    stats.first_price = stats.last_price;
-                    stats.buy_volume = 0.0;
-                    stats.sell_volume = 0.0;
+                    // 3. SİNYALİ NATS'A YAYINLA
+                    let trade_signal = TradeSignal {
+                        symbol: symbol.clone(),
+                        r#type: signal.into(), // 'type' anahtar kelimesi r#type olarak kaçış karakteri aldı
+                        confidence_score: confidence,
+                        recommended_leverage: 1.0,
+                        timestamp: chrono::Utc::now().timestamp_millis(),
+                        reason: format!("Pattern matching. Velocity: {:.6}", price_velocity),
+                    };
+
+                    let mut buf = Vec::new();
+                    trade_signal.encode(&mut buf)?;
+                    let _ = nats_client.publish(format!("signal.trade.{}", symbol), buf.into()).await;
+
+                    if signal != SignalType::Hold {
+                        info!("🎯 [SİNYAL] {} -> {:?} (Güven: {:.2})", symbol, signal, confidence);
+                    }
+
+                    stats.trade_count = 0; stats.first_price = stats.last_price; stats.buy_volume = 0.0; stats.sell_volume = 0.0;
                 }
             }
         }
