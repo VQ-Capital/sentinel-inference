@@ -25,7 +25,6 @@ use sentinel_protos::intelligence::sentiment_analyzer_service_client::SentimentA
 use sentinel_protos::intelligence::AnalyzeTextRequest;
 use sentinel_protos::market::{AggTrade, MarketStateVector};
 
-// Pencere (Window) Veri Yapısı
 struct WindowStats {
     first_price: f64,
     last_price: f64,
@@ -38,6 +37,8 @@ struct WindowStats {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+
+    // Parametrik ENV Değişkenleri
     let nats_url =
         std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
     let qdrant_url =
@@ -45,13 +46,29 @@ async fn main() -> Result<()> {
     let intel_url =
         std::env::var("INTELLIGENCE_URL").unwrap_or_else(|_| "http://localhost:50051".to_string());
 
+    let window_size_sec: i64 = std::env::var("WINDOW_SIZE_SEC")
+        .unwrap_or_else(|_| "30".to_string())
+        .parse()
+        .unwrap_or(30);
+    let min_ticks: i64 = std::env::var("MIN_TICKS")
+        .unwrap_or_else(|_| "25".to_string())
+        .parse()
+        .unwrap_or(25);
+    let warmup_required: i32 = std::env::var("WARMUP_VECTORS")
+        .unwrap_or_else(|_| "50".to_string())
+        .parse()
+        .unwrap_or(50);
+    let similarity_threshold: f32 = std::env::var("SIMILARITY_THRESHOLD")
+        .unwrap_or_else(|_| "0.97".to_string())
+        .parse()
+        .unwrap_or(0.97);
+
     let nats_client = async_nats::connect(&nats_url)
         .await
         .context("CRITICAL: NATS Bağlantı Hatası")?;
 
-    // Qdrant Reconnect Logic
     let mut qdrant_client = None;
-    for i in 1..=10 {
+    for _i in 1..=10 {
         if let Ok(client) = Qdrant::from_url(&qdrant_url).build() {
             if client.health_check().await.is_ok() {
                 qdrant_client = Some(client);
@@ -59,31 +76,27 @@ async fn main() -> Result<()> {
                 break;
             }
         }
-        warn!("⚠️ Qdrant aranıyor... ({}/10)", i);
         sleep(Duration::from_secs(2)).await;
     }
     let qdrant_client = qdrant_client.context("❌ Qdrant'a bağlanılamadı!")?;
 
-    // gRPC Intelligence Client
     let mut intel_client = match SentimentAnalyzerServiceClient::connect(intel_url.clone()).await {
         Ok(c) => Some(c),
         Err(e) => {
-            warn!(
-                "⚠️ Intelligence servisine bağlanılamadı (NLP Devre Dışı): {}",
-                e
-            );
+            warn!("⚠️ NLP Devre Dışı: {}", e);
             None
         }
     };
 
-    let mut subscriber = nats_client
-        .subscribe("market.trade.>")
-        .await
-        .context("NATS Kanal Hatası")?;
-
+    let mut subscriber = nats_client.subscribe("market.trade.>").await?;
     let mut windows: HashMap<String, WindowStats> = HashMap::new();
 
-    info!("🧠 Inference Motoru AKTİF: Echo-Chamber Korumalı 3D Vektör Arama Modu Çalışıyor.");
+    let mut generated_vectors_count = 0;
+
+    info!(
+        "🧠 Inference Motoru AKTİF | Window: {}s | Warmup: {} vektör | Threshold: {}",
+        window_size_sec, warmup_required, similarity_threshold
+    );
 
     while let Some(message) = subscriber.next().await {
         if let Ok(trade) = AggTrade::decode(message.payload) {
@@ -98,10 +111,8 @@ async fn main() -> Result<()> {
                 window_start_sec: trade_sec,
             });
 
-            // GÜNCELLEME 1: 10 Saniyelik Pencere (Daha stabil trend yakalamak için)
-            if trade_sec >= stats.window_start_sec + 10 {
-                // GÜNCELLEME 2: Burn-in (Yeterli veri yoksa vektör çıkarma)
-                if stats.trade_count >= 10 {
+            if trade_sec >= stats.window_start_sec + window_size_sec {
+                if stats.trade_count >= min_ticks {
                     let price_velocity = (stats.last_price - stats.first_price) / stats.first_price;
                     let total_vol = stats.buy_volume + stats.sell_volume;
                     let volume_imbalance = if total_vol > 0.0 {
@@ -110,17 +121,15 @@ async fn main() -> Result<()> {
                         0.0
                     };
 
-                    // NLP Simülasyon Metinleri
-                    let simulated_news = if price_velocity > 0.0005 {
-                        "Massive breakout seen, market looks highly bullish and ready to moon!"
-                    } else if price_velocity < -0.0005 {
-                        "Market faces heavy selloff, bearish trend indicates a crash and dump."
-                    } else {
-                        "Market is ranging near support, accumulation ongoing."
-                    };
-
                     let mut sentiment_score = 0.0;
                     if let Some(client) = &mut intel_client {
+                        let simulated_news = if price_velocity > 0.0005 {
+                            "Massive breakout seen, highly bullish!"
+                        } else if price_velocity < -0.0005 {
+                            "Market faces heavy selloff, dump."
+                        } else {
+                            "Market is ranging near support."
+                        };
                         let req = tonic::Request::new(AnalyzeTextRequest {
                             text: simulated_news.into(),
                         });
@@ -129,39 +138,46 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    generated_vectors_count += 1;
                     let current_vector = vec![
                         price_velocity as f32,
                         volume_imbalance as f32,
                         sentiment_score as f32,
                     ];
 
-                    let mut final_signal = SignalType::Hold;
-                    let mut confidence = 0.0;
-                    let mut reason = "No historical match. Holding.".to_string();
+                    // COLD START (ISINMA) KONTROLÜ
+                    if generated_vectors_count < warmup_required {
+                        if generated_vectors_count % 10 == 0 {
+                            info!("🔥 WARM-UP SÜRECİ: Vektörler toplanıyor ({}/{}) İşlem yapılmayacak.", generated_vectors_count, warmup_required);
+                        }
+                    } else {
+                        // Isınma Bitti, İşlem Arayabiliriz
+                        let mut final_signal = SignalType::Hold;
+                        let mut confidence = 0.0;
+                        let mut reason = "No match.".to_string();
 
-                    // Qdrant'ta arama yap (En iyi 5 sonucu getir)
-                    let search_result = qdrant_client
-                        .search_points(
-                            SearchPointsBuilder::new("market_states", current_vector.clone(), 5)
+                        if let Ok(response) = qdrant_client
+                            .search_points(
+                                SearchPointsBuilder::new(
+                                    "market_states",
+                                    current_vector.clone(),
+                                    5,
+                                )
                                 .with_payload(true),
-                        )
-                        .await;
-
-                    match search_result {
-                        Ok(response) => {
-                            // GÜNCELLEME 3: ECHO CHAMBER KORUMASI
-                            // Mükemmel (%100) eşleşmeleri yoksay. Sadece 0.90 ile 0.995 arasını gerçek geçmiş olarak kabul et.
+                            )
+                            .await
+                        {
+                            // DİNAMİK THRESHOLD KULLANILDI (Örn: > 0.97)
                             if let Some(best_match) = response
                                 .result
                                 .into_iter()
-                                .find(|m| m.score >= 0.90 && m.score <= 0.995)
+                                .find(|m| m.score >= similarity_threshold && m.score <= 0.995)
                             {
                                 let past_velocity = best_match
                                     .payload
                                     .get("velocity")
                                     .and_then(|v| v.as_double())
                                     .unwrap_or(0.0);
-
                                 confidence = best_match.score as f64;
 
                                 if past_velocity > 0.0002 {
@@ -177,37 +193,31 @@ async fn main() -> Result<()> {
                                         confidence
                                     );
                                 }
-
-                                if final_signal != SignalType::Hold {
-                                    info!(
-                                        "🚀 [AI BEYNİ] {} -> Sinyal: {:?} | Neden: {}",
-                                        trade.symbol, final_signal, reason
-                                    );
-                                }
                             }
                         }
-                        Err(e) => warn!("⚠️ Qdrant Arama Hatası: {}", e),
-                    }
 
-                    // Eğer gürültüden arındırılmış geçerli bir sinyal varsa yayınla
-                    if final_signal != SignalType::Hold {
-                        let trade_signal = TradeSignal {
-                            symbol: trade.symbol.clone(),
-                            r#type: final_signal.into(),
-                            confidence_score: confidence,
-                            recommended_leverage: 1.0,
-                            timestamp: trade.timestamp,
-                            reason,
-                        };
-                        let mut sig_buf = Vec::new();
-                        if trade_signal.encode(&mut sig_buf).is_ok() {
-                            let _ = nats_client
-                                .publish(format!("signal.trade.{}", trade.symbol), sig_buf.into())
-                                .await;
+                        if final_signal != SignalType::Hold {
+                            let trade_signal = TradeSignal {
+                                symbol: trade.symbol.clone(),
+                                r#type: final_signal.into(),
+                                confidence_score: confidence,
+                                recommended_leverage: 1.0,
+                                timestamp: trade.timestamp,
+                                reason,
+                            };
+                            let mut sig_buf = Vec::new();
+                            if trade_signal.encode(&mut sig_buf).is_ok() {
+                                let _ = nats_client
+                                    .publish(
+                                        format!("signal.trade.{}", trade.symbol),
+                                        sig_buf.into(),
+                                    )
+                                    .await;
+                            }
                         }
                     }
 
-                    // Mevcut piyasa vektörünü NATS'a bas (Storage motoru Qdrant'a yazacak)
+                    // Vektörü her halükarda kaydet (Storage için)
                     let current_state = MarketStateVector {
                         symbol: trade.symbol.clone(),
                         window_start_time: stats.window_start_sec * 1000,
@@ -225,7 +235,6 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Pencereyi sıfırla ve yeni döneme başla
                 stats.trade_count = 0;
                 stats.first_price = trade.price;
                 stats.buy_volume = 0.0;
@@ -233,7 +242,6 @@ async fn main() -> Result<()> {
                 stats.window_start_sec = trade_sec;
             }
 
-            // Anlık tick biriktirme
             stats.last_price = trade.price;
             stats.trade_count += 1;
             if trade.is_buyer_maker {
