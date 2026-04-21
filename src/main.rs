@@ -180,18 +180,30 @@ async fn main() -> Result<()> {
                                     .unwrap_or(0.0);
                                 confidence = best_match.score as f64;
 
+                                // 💡 YENİ: MAKRO TREND FİLTRESİ
+                                // Eğer geçmişte yükselmişse (BUY sinyali), ama ŞU AN fiyat düşüyorsa İPTAL ET
                                 if past_velocity > 0.0002 {
-                                    final_signal = SignalType::Buy;
-                                    reason = format!(
-                                        "Vektör Eşleşmesi (Skor: {:.3}). Geçmiş trend: Yukarı.",
-                                        confidence
-                                    );
+                                    if price_velocity >= -0.0001 {
+                                        // Anlık trend çok kötü değilse AL
+                                        final_signal = SignalType::Buy;
+                                        reason = format!(
+                                            "Vektör Eşleşmesi (Skor: {:.3}). Geçmiş trend: Yukarı.",
+                                            confidence
+                                        );
+                                    } else {
+                                        reason = "Vektör Eşleşmesi var ama anlık trend negatif. İşlem iptal.".to_string();
+                                    }
                                 } else if past_velocity < -0.0002 {
-                                    final_signal = SignalType::Sell;
-                                    reason = format!(
-                                        "Vektör Eşleşmesi (Skor: {:.3}). Geçmiş trend: Aşağı.",
-                                        confidence
-                                    );
+                                    if price_velocity <= 0.0001 {
+                                        // Anlık trend çok iyi değilse SAT
+                                        final_signal = SignalType::Sell;
+                                        reason = format!(
+                                            "Vektör Eşleşmesi (Skor: {:.3}). Geçmiş trend: Aşağı.",
+                                            confidence
+                                        );
+                                    } else {
+                                        reason = "Vektör Eşleşmesi var ama anlık trend pozitif. İşlem iptal.".to_string();
+                                    }
                                 }
                             }
                         }
