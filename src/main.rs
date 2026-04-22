@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
     let similarity_threshold: f32 = std::env::var("SIMILARITY_THRESHOLD")
         .unwrap_or_else(|_| "0.985".to_string())
         .parse()
-        .unwrap_or(0.985); // HFT SNIPER AYARI
+        .unwrap_or(0.985);
 
     let nats_client = async_nats::connect(&nats_url)
         .await
@@ -87,7 +87,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    // MULTI-COIN DİNLEME (Tüm trade'leri dinliyor)
     let mut subscriber = nats_client.subscribe("market.trade.>").await?;
     let mut windows: HashMap<String, WindowStats> = HashMap::new();
     let mut generated_vectors_count: HashMap<String, i32> = HashMap::new();
@@ -157,11 +156,15 @@ async fn main() -> Result<()> {
                             );
                         }
                     } else {
+                        // Isınma bittiği an tek seferlik uyanış logu
+                        if *v_count == warmup_required {
+                            info!("🚀 [WAKE UP] {} Sniper Modu Devrede!", trade.symbol);
+                        }
+
                         let mut final_signal = SignalType::Hold;
                         let mut confidence = 0.0;
                         let mut reason = "No match.".to_string();
 
-                        // 💡 QDRANT MULTI-COIN PAYLOAD FİLTRESİ
                         let symbol_filter =
                             Filter::all(vec![Condition::matches("symbol", trade.symbol.clone())]);
 
@@ -172,16 +175,20 @@ async fn main() -> Result<()> {
                                     current_vector.clone(),
                                     5,
                                 )
-                                .filter(symbol_filter) // Sadece bu coinin geçmişine bak!
+                                .filter(symbol_filter)
                                 .with_payload(true),
                             )
                             .await
                         {
+                            let mut match_found = false;
+
+                            // ÇÖZÜM: .iter() kullanarak sahipliği koruduk, hata çözüldü.
                             if let Some(best_match) = response
                                 .result
-                                .into_iter()
+                                .iter()
                                 .find(|m| m.score >= similarity_threshold && m.score <= 0.995)
                             {
+                                match_found = true;
                                 let past_velocity = best_match
                                     .payload
                                     .get("velocity")
@@ -202,6 +209,13 @@ async fn main() -> Result<()> {
                                         confidence
                                     );
                                 }
+                            }
+
+                            // RADAR: Eşik geçilmese bile en iyi skoru logla
+                            if !match_found && *v_count % 10 == 0 {
+                                let top_score =
+                                    response.result.first().map(|m| m.score).unwrap_or(0.0);
+                                info!("🔭 [RADAR] {} taranıyor. En iyi benzerlik: {:.3} (Baraj: {:.3})", trade.symbol, top_score, similarity_threshold);
                             }
                         }
 
