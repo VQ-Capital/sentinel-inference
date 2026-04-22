@@ -2,7 +2,7 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use prost::Message;
-use qdrant_client::qdrant::{Condition, Filter, SearchPointsBuilder};
+use qdrant_client::qdrant::{Condition, Filter, Range, SearchPointsBuilder};
 use qdrant_client::Qdrant;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
@@ -54,13 +54,19 @@ async fn main() -> Result<()> {
         .parse()
         .unwrap_or(25);
     let warmup_required: i32 = std::env::var("WARMUP_VECTORS")
-        .unwrap_or_else(|_| "50".to_string())
+        .unwrap_or_else(|_| "500".to_string())
         .parse()
-        .unwrap_or(50);
+        .unwrap_or(500);
     let similarity_threshold: f32 = std::env::var("SIMILARITY_THRESHOLD")
         .unwrap_or_else(|_| "0.985".to_string())
         .parse()
         .unwrap_or(0.985);
+
+    // YENİ: KÖR NOKTA (Self-Match Koruması) - 15 Dakika (900 Saniye)
+    let blindspot_sec: i64 = std::env::var("BLINDSPOT_SEC")
+        .unwrap_or_else(|_| "900".to_string())
+        .parse()
+        .unwrap_or(900);
 
     let nats_client = async_nats::connect(&nats_url)
         .await
@@ -92,8 +98,8 @@ async fn main() -> Result<()> {
     let mut generated_vectors_count: HashMap<String, i32> = HashMap::new();
 
     info!(
-        "🧠 Multi-Coin Inference Motoru AKTİF | Window: {}s | Warmup: {} vektör | Sniper Threshold: {}",
-        window_size_sec, warmup_required, similarity_threshold
+        "🧠 Multi-Coin Inference Motoru AKTİF | Window: {}s | Warmup: {} | Blindspot: {}s | Thr: {}",
+        window_size_sec, warmup_required, blindspot_sec, similarity_threshold
     );
 
     while let Some(message) = subscriber.next().await {
@@ -148,25 +154,33 @@ async fn main() -> Result<()> {
                         sentiment_score as f32,
                     ];
 
+                    // KENDİ KUYRUĞUNU KOVALAMAMASI İÇİN "BLINDSPOT" ZAMAN FİLTRESİ
+                    let max_allowed_timestamp = trade.timestamp - (blindspot_sec * 1000);
+                    let time_range = Range {
+                        lt: Some(max_allowed_timestamp as f64),
+                        ..Default::default()
+                    };
+
+                    let symbol_filter = Filter::all(vec![
+                        Condition::matches("symbol", trade.symbol.clone()),
+                        Condition::range("timestamp", time_range),
+                    ]);
+
                     if *v_count < warmup_required {
-                        if *v_count % 10 == 0 {
+                        if *v_count % 50 == 0 {
                             info!(
                                 "🔥 WARM-UP [{}]: Vektörler toplanıyor ({}/{})",
                                 trade.symbol, v_count, warmup_required
                             );
                         }
                     } else {
-                        // Isınma bittiği an tek seferlik uyanış logu
                         if *v_count == warmup_required {
-                            info!("🚀 [WAKE UP] {} Sniper Modu Devrede!", trade.symbol);
+                            info!("🚀 [WAKE UP] {} Keskin Nişancı (Sniper) Modu Devrede! Sessizce Bekleniyor...", trade.symbol);
                         }
 
                         let mut final_signal = SignalType::Hold;
                         let mut confidence = 0.0;
                         let mut reason = "No match.".to_string();
-
-                        let symbol_filter =
-                            Filter::all(vec![Condition::matches("symbol", trade.symbol.clone())]);
 
                         if let Ok(response) = qdrant_client
                             .search_points(
@@ -175,18 +189,17 @@ async fn main() -> Result<()> {
                                     current_vector.clone(),
                                     5,
                                 )
-                                .filter(symbol_filter)
+                                .filter(symbol_filter.clone())
                                 .with_payload(true),
                             )
                             .await
                         {
                             let mut match_found = false;
 
-                            // ÇÖZÜM: .iter() kullanarak sahipliği koruduk, hata çözüldü.
                             if let Some(best_match) = response
                                 .result
                                 .iter()
-                                .find(|m| m.score >= similarity_threshold && m.score <= 0.995)
+                                .find(|m| m.score >= similarity_threshold && m.score <= 0.999)
                             {
                                 match_found = true;
                                 let past_velocity = best_match
@@ -199,23 +212,22 @@ async fn main() -> Result<()> {
                                 if past_velocity > 0.0002 && price_velocity >= -0.0001 {
                                     final_signal = SignalType::Buy;
                                     reason = format!(
-                                        "Vektör Eşleşmesi ({:.3}). Trend: Yukarı.",
+                                        "Tarihsel Eşleşme ({:.3}). Trend: Yukarı.",
                                         confidence
                                     );
                                 } else if past_velocity < -0.0002 && price_velocity <= 0.0001 {
                                     final_signal = SignalType::Sell;
                                     reason = format!(
-                                        "Vektör Eşleşmesi ({:.3}). Trend: Aşağı.",
+                                        "Tarihsel Eşleşme ({:.3}). Trend: Aşağı.",
                                         confidence
                                     );
                                 }
                             }
 
-                            // RADAR: Eşik geçilmese bile en iyi skoru logla
-                            if !match_found && *v_count % 10 == 0 {
+                            if !match_found && *v_count % 20 == 0 {
                                 let top_score =
                                     response.result.first().map(|m| m.score).unwrap_or(0.0);
-                                info!("🔭 [RADAR] {} taranıyor. En iyi benzerlik: {:.3} (Baraj: {:.3})", trade.symbol, top_score, similarity_threshold);
+                                info!("🔭 [RADAR] {} Taranıyor. En iyi GEÇMİŞ benzerlik: {:.3} (Eşik: {:.3})", trade.symbol, top_score, similarity_threshold);
                             }
                         }
 
