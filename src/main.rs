@@ -2,7 +2,7 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use prost::Message;
-use qdrant_client::qdrant::SearchPointsBuilder;
+use qdrant_client::qdrant::{Condition, Filter, SearchPointsBuilder};
 use qdrant_client::Qdrant;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
@@ -38,7 +38,6 @@ struct WindowStats {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    // Parametrik ENV Değişkenleri
     let nats_url =
         std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
     let qdrant_url =
@@ -59,9 +58,9 @@ async fn main() -> Result<()> {
         .parse()
         .unwrap_or(50);
     let similarity_threshold: f32 = std::env::var("SIMILARITY_THRESHOLD")
-        .unwrap_or_else(|_| "0.97".to_string())
+        .unwrap_or_else(|_| "0.985".to_string())
         .parse()
-        .unwrap_or(0.97);
+        .unwrap_or(0.985); // HFT SNIPER AYARI
 
     let nats_client = async_nats::connect(&nats_url)
         .await
@@ -88,13 +87,13 @@ async fn main() -> Result<()> {
         }
     };
 
+    // MULTI-COIN DİNLEME (Tüm trade'leri dinliyor)
     let mut subscriber = nats_client.subscribe("market.trade.>").await?;
     let mut windows: HashMap<String, WindowStats> = HashMap::new();
-
-    let mut generated_vectors_count = 0;
+    let mut generated_vectors_count: HashMap<String, i32> = HashMap::new();
 
     info!(
-        "🧠 Inference Motoru AKTİF | Window: {}s | Warmup: {} vektör | Threshold: {}",
+        "🧠 Multi-Coin Inference Motoru AKTİF | Window: {}s | Warmup: {} vektör | Sniper Threshold: {}",
         window_size_sec, warmup_required, similarity_threshold
     );
 
@@ -130,6 +129,7 @@ async fn main() -> Result<()> {
                         } else {
                             "Market is ranging near support."
                         };
+
                         let req = tonic::Request::new(AnalyzeTextRequest {
                             text: simulated_news.into(),
                         });
@@ -138,23 +138,32 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    generated_vectors_count += 1;
+                    let v_count = generated_vectors_count
+                        .entry(trade.symbol.clone())
+                        .or_insert(0);
+                    *v_count += 1;
+
                     let current_vector = vec![
                         price_velocity as f32,
                         volume_imbalance as f32,
                         sentiment_score as f32,
                     ];
 
-                    // COLD START (ISINMA) KONTROLÜ
-                    if generated_vectors_count < warmup_required {
-                        if generated_vectors_count % 10 == 0 {
-                            info!("🔥 WARM-UP SÜRECİ: Vektörler toplanıyor ({}/{}) İşlem yapılmayacak.", generated_vectors_count, warmup_required);
+                    if *v_count < warmup_required {
+                        if *v_count % 10 == 0 {
+                            info!(
+                                "🔥 WARM-UP [{}]: Vektörler toplanıyor ({}/{})",
+                                trade.symbol, v_count, warmup_required
+                            );
                         }
                     } else {
-                        // Isınma Bitti, İşlem Arayabiliriz
                         let mut final_signal = SignalType::Hold;
                         let mut confidence = 0.0;
                         let mut reason = "No match.".to_string();
+
+                        // 💡 QDRANT MULTI-COIN PAYLOAD FİLTRESİ
+                        let symbol_filter =
+                            Filter::all(vec![Condition::matches("symbol", trade.symbol.clone())]);
 
                         if let Ok(response) = qdrant_client
                             .search_points(
@@ -163,11 +172,11 @@ async fn main() -> Result<()> {
                                     current_vector.clone(),
                                     5,
                                 )
+                                .filter(symbol_filter) // Sadece bu coinin geçmişine bak!
                                 .with_payload(true),
                             )
                             .await
                         {
-                            // DİNAMİK THRESHOLD KULLANILDI (Örn: > 0.97)
                             if let Some(best_match) = response
                                 .result
                                 .into_iter()
@@ -180,30 +189,18 @@ async fn main() -> Result<()> {
                                     .unwrap_or(0.0);
                                 confidence = best_match.score as f64;
 
-                                // 💡 YENİ: MAKRO TREND FİLTRESİ
-                                // Eğer geçmişte yükselmişse (BUY sinyali), ama ŞU AN fiyat düşüyorsa İPTAL ET
-                                if past_velocity > 0.0002 {
-                                    if price_velocity >= -0.0001 {
-                                        // Anlık trend çok kötü değilse AL
-                                        final_signal = SignalType::Buy;
-                                        reason = format!(
-                                            "Vektör Eşleşmesi (Skor: {:.3}). Geçmiş trend: Yukarı.",
-                                            confidence
-                                        );
-                                    } else {
-                                        reason = "Vektör Eşleşmesi var ama anlık trend negatif. İşlem iptal.".to_string();
-                                    }
-                                } else if past_velocity < -0.0002 {
-                                    if price_velocity <= 0.0001 {
-                                        // Anlık trend çok iyi değilse SAT
-                                        final_signal = SignalType::Sell;
-                                        reason = format!(
-                                            "Vektör Eşleşmesi (Skor: {:.3}). Geçmiş trend: Aşağı.",
-                                            confidence
-                                        );
-                                    } else {
-                                        reason = "Vektör Eşleşmesi var ama anlık trend pozitif. İşlem iptal.".to_string();
-                                    }
+                                if past_velocity > 0.0002 && price_velocity >= -0.0001 {
+                                    final_signal = SignalType::Buy;
+                                    reason = format!(
+                                        "Vektör Eşleşmesi ({:.3}). Trend: Yukarı.",
+                                        confidence
+                                    );
+                                } else if past_velocity < -0.0002 && price_velocity <= 0.0001 {
+                                    final_signal = SignalType::Sell;
+                                    reason = format!(
+                                        "Vektör Eşleşmesi ({:.3}). Trend: Aşağı.",
+                                        confidence
+                                    );
                                 }
                             }
                         }
@@ -229,7 +226,6 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    // Vektörü her halükarda kaydet (Storage için)
                     let current_state = MarketStateVector {
                         symbol: trade.symbol.clone(),
                         window_start_time: stats.window_start_sec * 1000,
