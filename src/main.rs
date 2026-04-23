@@ -6,7 +6,7 @@ use qdrant_client::qdrant::{Condition, Filter, Range, SearchPointsBuilder};
 use qdrant_client::Qdrant;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
-use tracing::{info, warn};
+use tracing::info;
 
 pub mod sentinel_protos {
     pub mod market {
@@ -21,8 +21,6 @@ pub mod sentinel_protos {
 }
 
 use sentinel_protos::execution::{trade_signal::SignalType, TradeSignal};
-use sentinel_protos::intelligence::sentiment_analyzer_service_client::SentimentAnalyzerServiceClient;
-use sentinel_protos::intelligence::AnalyzeTextRequest;
 use sentinel_protos::market::{AggTrade, MarketStateVector};
 
 struct WindowStats {
@@ -42,8 +40,6 @@ async fn main() -> Result<()> {
         std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
     let qdrant_url =
         std::env::var("QDRANT_URL").unwrap_or_else(|_| "http://localhost:6334".to_string());
-    let intel_url =
-        std::env::var("INTELLIGENCE_URL").unwrap_or_else(|_| "http://localhost:50051".to_string());
 
     let window_size_sec: i64 = std::env::var("WINDOW_SIZE_SEC")
         .unwrap_or_else(|_| "30".to_string())
@@ -57,12 +53,11 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "500".to_string())
         .parse()
         .unwrap_or(500);
+    // Eşik değerini gerçekçi bir seviyeye çektik çünkü vektörler artık çok daha spesifik
     let similarity_threshold: f32 = std::env::var("SIMILARITY_THRESHOLD")
-        .unwrap_or_else(|_| "0.985".to_string())
+        .unwrap_or_else(|_| "0.95".to_string())
         .parse()
-        .unwrap_or(0.985);
-
-    // YENİ: KÖR NOKTA (Self-Match Koruması) - 15 Dakika (900 Saniye)
+        .unwrap_or(0.95);
     let blindspot_sec: i64 = std::env::var("BLINDSPOT_SEC")
         .unwrap_or_else(|_| "900".to_string())
         .parse()
@@ -85,20 +80,12 @@ async fn main() -> Result<()> {
     }
     let qdrant_client = qdrant_client.context("❌ Qdrant'a bağlanılamadı!")?;
 
-    let mut intel_client = match SentimentAnalyzerServiceClient::connect(intel_url.clone()).await {
-        Ok(c) => Some(c),
-        Err(e) => {
-            warn!("⚠️ NLP Devre Dışı: {}", e);
-            None
-        }
-    };
-
     let mut subscriber = nats_client.subscribe("market.trade.>").await?;
     let mut windows: HashMap<String, WindowStats> = HashMap::new();
     let mut generated_vectors_count: HashMap<String, i32> = HashMap::new();
 
     info!(
-        "🧠 Multi-Coin Inference Motoru AKTİF | Window: {}s | Warmup: {} | Blindspot: {}s | Thr: {}",
+        "🧠 Multi-Coin Inference Motoru (QUANT V2) AKTİF | Window: {}s | Warmup: {} | Blindspot: {}s | Thr: {}",
         window_size_sec, warmup_required, blindspot_sec, similarity_threshold
     );
 
@@ -125,36 +112,20 @@ async fn main() -> Result<()> {
                         0.0
                     };
 
-                    let mut sentiment_score = 0.0;
-                    if let Some(client) = &mut intel_client {
-                        let simulated_news = if price_velocity > 0.0005 {
-                            "Massive breakout seen, highly bullish!"
-                        } else if price_velocity < -0.0005 {
-                            "Market faces heavy selloff, dump."
-                        } else {
-                            "Market is ranging near support."
-                        };
-
-                        let req = tonic::Request::new(AnalyzeTextRequest {
-                            text: simulated_news.into(),
-                        });
-                        if let Ok(resp) = client.analyze_text(req).await {
-                            sentiment_score = resp.into_inner().score;
-                        }
-                    }
-
                     let v_count = generated_vectors_count
                         .entry(trade.symbol.clone())
                         .or_insert(0);
                     *v_count += 1;
 
-                    let current_vector = vec![
-                        price_velocity as f32,
-                        volume_imbalance as f32,
-                        sentiment_score as f32,
-                    ];
+                    // 🚨 MATEMATİKSEL DÜZELTME (SCALING & ENTROPY) 🚨
+                    // 1. Fiyat hızını x10.000 ile çarpıyoruz ki Cosine açısını etkileyebilsin.
+                    let scaled_velocity = (price_velocity * 10000.0) as f32;
+                    // 2. 3. Boyut olarak anlamsız sentiment yerine, o periyottaki işlem aktivitesini (Volatilite Göstergesi) koyuyoruz.
+                    let activity_density = (stats.trade_count as f32 / 1000.0).clamp(0.0, 1.0);
 
-                    // KENDİ KUYRUĞUNU KOVALAMAMASI İÇİN "BLINDSPOT" ZAMAN FİLTRESİ
+                    let current_vector =
+                        vec![scaled_velocity, volume_imbalance as f32, activity_density];
+
                     let max_allowed_timestamp = trade.timestamp - (blindspot_sec * 1000);
                     let time_range = Range {
                         lt: Some(max_allowed_timestamp as f64),
@@ -169,13 +140,16 @@ async fn main() -> Result<()> {
                     if *v_count < warmup_required {
                         if *v_count % 50 == 0 {
                             info!(
-                                "🔥 WARM-UP [{}]: Vektörler toplanıyor ({}/{})",
+                                "🔥 WARM-UP [{}]: Yeni Vektörler Toplanıyor ({}/{})",
                                 trade.symbol, v_count, warmup_required
                             );
                         }
                     } else {
                         if *v_count == warmup_required {
-                            info!("🚀 [WAKE UP] {} Keskin Nişancı (Sniper) Modu Devrede! Sessizce Bekleniyor...", trade.symbol);
+                            info!(
+                                "🚀 [WAKE UP] {} Keskin Nişancı Modu Devrede! Av Bekleniyor...",
+                                trade.symbol
+                            );
                         }
 
                         let mut final_signal = SignalType::Hold;
@@ -202,32 +176,52 @@ async fn main() -> Result<()> {
                                 .find(|m| m.score >= similarity_threshold && m.score <= 0.999)
                             {
                                 match_found = true;
+                                confidence = best_match.score as f64;
+
+                                // Orijinal (Scale edilmemiş) velocity'yi payload'dan alıyoruz
                                 let past_velocity = best_match
                                     .payload
                                     .get("velocity")
                                     .and_then(|v| v.as_double())
                                     .unwrap_or(0.0);
-                                confidence = best_match.score as f64;
+
+                                // LOG İÇİN: Eşleşen vektörün ne kadar geçmişten geldiğini hesapla
+                                let past_timestamp = best_match
+                                    .payload
+                                    .get("timestamp")
+                                    .and_then(|v| v.as_integer())
+                                    .unwrap_or(0);
+                                let minutes_ago = (trade.timestamp - past_timestamp) / 60000;
 
                                 if past_velocity > 0.0002 && price_velocity >= -0.0001 {
                                     final_signal = SignalType::Buy;
                                     reason = format!(
-                                        "Tarihsel Eşleşme ({:.3}). Trend: Yukarı.",
-                                        confidence
+                                        "Tarihsel Eşleşme ({} dk önce, Skor: {:.3}). Yön: YUKARI.",
+                                        minutes_ago, confidence
                                     );
                                 } else if past_velocity < -0.0002 && price_velocity <= 0.0001 {
                                     final_signal = SignalType::Sell;
                                     reason = format!(
-                                        "Tarihsel Eşleşme ({:.3}). Trend: Aşağı.",
-                                        confidence
+                                        "Tarihsel Eşleşme ({} dk önce, Skor: {:.3}). Yön: AŞAĞI.",
+                                        minutes_ago, confidence
                                     );
                                 }
                             }
 
+                            // Eşleşme bulunmasa bile Radarın yeni matematiğini göster
                             if !match_found && *v_count % 20 == 0 {
-                                let top_score =
-                                    response.result.first().map(|m| m.score).unwrap_or(0.0);
-                                info!("🔭 [RADAR] {} Taranıyor. En iyi GEÇMİŞ benzerlik: {:.3} (Eşik: {:.3})", trade.symbol, top_score, similarity_threshold);
+                                if let Some(top_match) = response.result.first() {
+                                    let top_score = top_match.score;
+                                    let past_ts = top_match
+                                        .payload
+                                        .get("timestamp")
+                                        .and_then(|v| v.as_integer())
+                                        .unwrap_or(0);
+                                    let mins_ago = (trade.timestamp - past_ts) / 60000;
+
+                                    info!("🔭 [RADAR] {} Taranıyor. En iyi GEÇMİŞ: {:.3} ({} dakika önce, Eşik: {:.3})",
+                                        trade.symbol, top_score, mins_ago, similarity_threshold);
+                                }
                             }
                         }
 
@@ -252,13 +246,14 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    // Sistemin çalışması için QuestDB ve Qdrant'a yazılacak state
                     let current_state = MarketStateVector {
                         symbol: trade.symbol.clone(),
                         window_start_time: stats.window_start_sec * 1000,
                         window_end_time: trade_sec * 1000,
-                        price_velocity,
+                        price_velocity, // Payload'a gerçek velocity yazılıyor
                         volume_imbalance,
-                        sentiment_score,
+                        sentiment_score: 0.0, // Payload uyumluluğu için
                         embeddings: vec![],
                     };
                     let mut state_buf = Vec::new();
