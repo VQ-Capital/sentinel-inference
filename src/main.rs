@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use prost::Message;
 use qdrant_client::qdrant::{Condition, Filter, Range, SearchPointsBuilder};
+use qdrant_client::qdrant::{CreateCollectionBuilder, Distance, VectorParamsBuilder};
 use qdrant_client::Qdrant;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,7 +25,7 @@ pub mod sentinel_protos {
 
 use sentinel_protos::execution::{trade_signal::SignalType, TradeSignal};
 use sentinel_protos::intelligence::SemanticVector;
-use sentinel_protos::market::{AggTrade, MarketStateVector, OrderbookDepth};
+use sentinel_protos::market::{AggTrade, ChainUrgencyEvent, MarketStateVector, OrderbookDepth};
 
 // -----------------------------------------------------------------------------
 // 📈 QUANT MATH & STRUCTS
@@ -79,12 +80,14 @@ struct SymbolNormalizer {
     velocity_z: OnlineZScore,
     imbalance_z: OnlineZScore,
     sentiment_z: OnlineZScore,
+    urgency_z: OnlineZScore, // ✅ YENİ: 4. Boyut Z-Skoru
     vectors_collected: i32,
 }
 
 struct InferenceState {
     sentiment_cache: HashMap<String, (f64, i64)>,
     orderbook_imbalance: HashMap<String, f64>,
+    chain_urgency: HashMap<String, f64>, // ✅ YENİ: Mempool Aciliyeti
     normalizers: HashMap<String, SymbolNormalizer>,
 }
 
@@ -95,7 +98,6 @@ struct InferenceState {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    // 1. SPEC-FIRST CONFIGURATION (Environment Variables)
     let nats_url =
         std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
     let qdrant_url =
@@ -109,7 +111,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "25".to_string())
         .parse()?;
     let warmup_required: i32 = std::env::var("WARMUP_VECTORS")
-        .unwrap_or_else(|_| "500".to_string())
+        .unwrap_or_else(|_| "100".to_string())
         .parse()?;
     let similarity_threshold: f32 = std::env::var("SIMILARITY_THRESHOLD")
         .unwrap_or_else(|_| "0.985".to_string())
@@ -119,11 +121,7 @@ async fn main() -> Result<()> {
         .parse::<i64>()?
         * 1000;
 
-    info!("🧠 VQ-Inference v3.0 [FUSION MODE] Starting...");
-    info!(
-        "⚙️ Config: Window={}ms, MinTicks={}, Warmup={}, Threshold={}",
-        window_size_ms, min_ticks, warmup_required, similarity_threshold
-    );
+    info!("🧠 VQ-Inference v4.0 [4D OMNISCIENCE MODE] Starting...");
 
     let nats_client = async_nats::connect(&nats_url).await.context("NATS Error")?;
 
@@ -137,10 +135,24 @@ async fn main() -> Result<()> {
         }
         sleep(Duration::from_secs(2)).await;
     }
-    let qdrant = Arc::new(qdrant_opt.context("Qdrant Offline")?);
+    let q_client = qdrant_opt.context("Qdrant Offline")?;
+
+    // ✅ DİKKAT: Vektör boyutu 3'ten 4'e çıkarıldı!
+    if !q_client.collection_exists("market_states").await? {
+        q_client
+            .create_collection(
+                CreateCollectionBuilder::new("market_states")
+                    .vectors_config(VectorParamsBuilder::new(4, Distance::Cosine)),
+            )
+            .await?;
+        info!("🌌 Qdrant 4D Vector Space Created.");
+    }
+
+    let qdrant = Arc::new(q_client);
     let state = Arc::new(RwLock::new(InferenceState {
         sentiment_cache: HashMap::new(),
         orderbook_imbalance: HashMap::new(),
+        chain_urgency: HashMap::new(),
         normalizers: HashMap::new(),
     }));
 
@@ -168,7 +180,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // 📡 INTELLIGENCE MONITOR
+    // 📡 INTELLIGENCE (NLP) MONITOR
     let nats_int = nats_client.clone();
     let state_int = state.clone();
     tokio::spawn(async move {
@@ -185,7 +197,24 @@ async fn main() -> Result<()> {
         }
     });
 
-    // ⚡ HOT-PATH TRADE LOOP
+    // 📡 CHAIN URGENCY (MEMPOOL) MONITOR - YENİ!
+    let nats_chain = nats_client.clone();
+    let state_chain = state.clone();
+    tokio::spawn(async move {
+        if let Ok(mut sub) = nats_chain.subscribe("chain.urgency.>").await {
+            while let Some(msg) = sub.next().await {
+                if let Ok(event) = ChainUrgencyEvent::decode(msg.payload) {
+                    state_chain
+                        .write()
+                        .await
+                        .chain_urgency
+                        .insert(event.symbol, event.urgency_score);
+                }
+            }
+        }
+    });
+
+    // ⚡ HOT-PATH TRADE LOOP (FUSION)
     let mut trade_sub = nats_client.subscribe("market.trade.>").await?;
     let mut windows: HashMap<String, WindowStats> = HashMap::new();
 
@@ -227,6 +256,7 @@ async fn main() -> Result<()> {
                     } else {
                         0.0
                     };
+                    let urgency = *st.chain_urgency.get(&symbol).unwrap_or(&0.0); // ✅ 4. Boyut Verisi
 
                     let norm =
                         st.normalizers
@@ -235,6 +265,7 @@ async fn main() -> Result<()> {
                                 velocity_z: OnlineZScore::new(1000),
                                 imbalance_z: OnlineZScore::new(1000),
                                 sentiment_z: OnlineZScore::new(1000),
+                                urgency_z: OnlineZScore::new(1000),
                                 vectors_collected: 0,
                             });
 
@@ -242,7 +273,11 @@ async fn main() -> Result<()> {
                     let z_vel = norm.velocity_z.update(velocity);
                     let z_imb = norm.imbalance_z.update((trade_imb * 0.4) + (ob_imb * 0.6));
                     let z_sent = norm.sentiment_z.update(sentiment);
-                    let fusion_vector = vec![z_vel as f32, z_imb as f32, z_sent as f32];
+                    let z_urg = norm.urgency_z.update(urgency); // ✅ 4. Boyut Normalize Edildi
+
+                    // 🌌 4 BOYUTLU FÜZYON VEKTÖRÜ
+                    let fusion_vector =
+                        vec![z_vel as f32, z_imb as f32, z_sent as f32, z_urg as f32];
 
                     if norm.vectors_collected >= warmup_required {
                         let q_clone = qdrant.clone();
@@ -282,10 +317,7 @@ async fn main() -> Result<()> {
                                         confidence_score: best.score as f64,
                                         recommended_leverage: 1.0,
                                         timestamp: ts_clone,
-                                        reason: format!(
-                                            "V3 Fusion Match: {:.3} | Vel: {:.2}σ",
-                                            best.score, z_vel
-                                        ),
+                                        reason: format!("V4 OMNISCIENCE Match: {:.3}", best.score),
                                     };
                                     if z_vel > 1.2 {
                                         signal.r#type = SignalType::Buy as i32;
@@ -304,14 +336,9 @@ async fn main() -> Result<()> {
                                 }
                             }
                         });
-                    } else if norm.vectors_collected % 50 == 0 {
-                        info!(
-                            "⏳ [WARMUP] {}: {}/{} vectors collected.",
-                            symbol, norm.vectors_collected, warmup_required
-                        );
                     }
 
-                    // SAVE CURRENT STATE
+                    // NATS'A YENİ DURUMU BAS (Grafana için)
                     let state_msg = MarketStateVector {
                         symbol: symbol.clone(),
                         window_start_time: stats.window_start_ms,
@@ -319,6 +346,7 @@ async fn main() -> Result<()> {
                         price_velocity: z_vel,
                         volume_imbalance: z_imb,
                         sentiment_score: z_sent,
+                        chain_urgency: z_urg,
                         embeddings: fusion_vector.iter().map(|&x| x as f64).collect(),
                     };
                     let _ = nats_client
