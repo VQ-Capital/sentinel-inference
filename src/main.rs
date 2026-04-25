@@ -142,7 +142,7 @@ async fn main() -> Result<()> {
         q_client
             .create_collection(
                 CreateCollectionBuilder::new("market_states")
-                    .vectors_config(VectorParamsBuilder::new(4, Distance::Cosine)),
+                    .vectors_config(VectorParamsBuilder::new(4, Distance::Cosine)), // 4 boyutlu V4 Omniscience
             )
             .await?;
         info!("🌌 Qdrant 4D Vector Space Created.");
