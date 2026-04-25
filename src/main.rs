@@ -8,7 +8,7 @@ use qdrant_client::Qdrant;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tracing::info;
 
 pub mod sentinel_protos {
@@ -298,41 +298,54 @@ async fn main() -> Result<()> {
                                 ),
                             ]);
 
-                            if let Ok(res) = q_clone
-                                .search_points(
-                                    SearchPointsBuilder::new("market_states", v_clone, 3)
-                                        .filter(filter)
-                                        .with_payload(true),
-                                )
-                                .await
-                            {
-                                if let Some(best) = res
-                                    .result
-                                    .iter()
-                                    .find(|r| r.score >= similarity_threshold && r.score < 1.0)
-                                {
-                                    let mut signal = TradeSignal {
-                                        symbol: sym_clone.clone(),
-                                        r#type: SignalType::Hold as i32,
-                                        confidence_score: best.score as f64,
-                                        recommended_leverage: 1.0,
-                                        timestamp: ts_clone,
-                                        reason: format!("V4 OMNISCIENCE Match: {:.3}", best.score),
-                                    };
-                                    if z_vel > 1.2 {
-                                        signal.r#type = SignalType::Buy as i32;
-                                    } else if z_vel < -1.2 {
-                                        signal.r#type = SignalType::Sell as i32;
-                                    }
+                            // 🔧 CERRAHİ MÜDAHALE: Qdrant sorgusuna 15ms SLA Timeout eklendi!
+                            let search_future = q_clone.search_points(
+                                SearchPointsBuilder::new("market_states", v_clone, 3)
+                                    .filter(filter)
+                                    .with_payload(true),
+                            );
 
-                                    if signal.r#type != SignalType::Hold as i32 {
-                                        let _ = nats_pub
-                                            .publish(
-                                                format!("signal.trade.{}", sym_clone),
-                                                signal.encode_to_vec().into(),
-                                            )
-                                            .await;
+                            match timeout(Duration::from_millis(15), search_future).await {
+                                Ok(Ok(res)) => {
+                                    if let Some(best) = res
+                                        .result
+                                        .iter()
+                                        .find(|r| r.score >= similarity_threshold && r.score < 1.0)
+                                    {
+                                        let mut signal = TradeSignal {
+                                            symbol: sym_clone.clone(),
+                                            r#type: SignalType::Hold as i32,
+                                            confidence_score: best.score as f64,
+                                            recommended_leverage: 1.0,
+                                            timestamp: ts_clone,
+                                            reason: format!(
+                                                "V4 OMNISCIENCE Match: {:.3}",
+                                                best.score
+                                            ),
+                                        };
+                                        if z_vel > 1.2 {
+                                            signal.r#type = SignalType::Buy as i32;
+                                        } else if z_vel < -1.2 {
+                                            signal.r#type = SignalType::Sell as i32;
+                                        }
+
+                                        if signal.r#type != SignalType::Hold as i32 {
+                                            let _ = nats_pub
+                                                .publish(
+                                                    format!("signal.trade.{}", sym_clone),
+                                                    signal.encode_to_vec().into(),
+                                                )
+                                                .await;
+                                        }
                                     }
+                                }
+                                Ok(Err(e)) => {
+                                    // Qdrant iç hatası (Bağlantı koptu vb.)
+                                    tracing::error!("🔴 [QDRANT FAULT] Arama başarısız: {}", e);
+                                }
+                                Err(_) => {
+                                    // SLA İhlali (Graceful Degradation) - Taskı iptal et ve yut!
+                                    tracing::warn!("⏳ [SLA BREACH] Qdrant 15ms içinde yanıt vermedi. Vektör düştü (Dropped)!");
                                 }
                             }
                         });
