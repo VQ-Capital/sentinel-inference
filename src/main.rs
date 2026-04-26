@@ -241,14 +241,19 @@ async fn main() -> Result<()> {
     // 📡 INTELLIGENCE (NLP) MONITOR
     let nats_int = nats_client.clone();
     let state_int = state.clone();
+    // ⚡ [CERRAHİ 1]: INTELLIGENCE MONITOR DÜZELTİLDİ
     tokio::spawn(async move {
+        // Subject "intelligence.news.vector" olarak sabitlendi (Spec ile tam uyum)
         if let Ok(mut sub) = nats_int.subscribe("intelligence.news.vector").await {
             while let Some(msg) = sub.next().await {
                 if let Ok(vec) = SemanticVector::decode(msg.payload) {
-                    state_int.write().await.sentiment_cache.insert(
-                        vec.symbol.to_uppercase(),
-                        (vec.sentiment_score, vec.timestamp),
-                    );
+                    let symbol = vec.symbol.to_uppercase();
+                    state_int
+                        .write()
+                        .await
+                        .sentiment_cache
+                        .insert(symbol.clone(), (vec.sentiment_score, vec.timestamp));
+                    // info!("🧠 [FUSION-SYNC] Sentiment received for {}", symbol);
                 }
             }
         }
@@ -257,7 +262,9 @@ async fn main() -> Result<()> {
     // 📡 CHAIN URGENCY (MEMPOOL) MONITOR
     let nats_chain = nats_client.clone();
     let state_chain = state.clone();
+    // ⚡ [CERRAHİ 2]: CHAIN URGENCY MONITOR DÜZELTİLDİ
     tokio::spawn(async move {
+        // Subject "chain.urgency.*" olarak güncellendi
         if let Ok(mut sub) = nats_chain.subscribe("chain.urgency.>").await {
             while let Some(msg) = sub.next().await {
                 if let Ok(event) = ChainUrgencyEvent::decode(msg.payload) {
