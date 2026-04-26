@@ -328,11 +328,10 @@ async fn main() -> Result<()> {
 
                     norm.vectors_collected += 1;
 
-                    // DEAD CODE HATASINI ÇÖZEN KISIM (Hepsi update'e giriyor)
                     let z_vel = norm.velocity_z.update(velocity, z_scale);
                     let z_imb = norm
                         .imbalance_z
-                        .update((trade_imb * 0.4) + (ob_imb * 0.6), 1.0); // Zaten -1 ile +1 arası
+                        .update((trade_imb * 0.4) + (ob_imb * 0.6), 1.0);
                     let z_sent = norm.sentiment_z.update(sentiment, 1.0);
                     let z_urg = norm.urgency_z.update(urgency, 1.0);
 
@@ -364,44 +363,42 @@ async fn main() -> Result<()> {
                                     .with_payload(true),
                             );
 
-                            match timeout(Duration::from_millis(search_timeout_ms), search_future)
-                                .await
+                            // CLIPPY SINGLE-MATCH UYARISINI ÇÖZEN YAPI
+                            if let Ok(Ok(res)) =
+                                timeout(Duration::from_millis(search_timeout_ms), search_future)
+                                    .await
                             {
-                                Ok(Ok(res)) => {
-                                    // KOSİNÜS TUZAĞI DÜZELTİLDİ: 1.01 (Yuvarlama payı eklendi)
-                                    if let Some(best) = res.result.iter().find(|r| {
-                                        r.score >= similarity_threshold && r.score <= 1.01
-                                    }) {
-                                        let mut signal = TradeSignal {
-                                            symbol: sym_clone.clone(),
-                                            r#type: SignalType::Hold as i32,
-                                            confidence_score: best.score as f64,
-                                            recommended_leverage: 1.0,
-                                            timestamp: ts_clone,
-                                            reason: format!(
-                                                "V4 OMNISCIENCE Match: {:.3}",
-                                                best.score
-                                            ),
-                                        };
+                                // KOSİNÜS TUZAĞI DÜZELTİLDİ: 1.01 (Yuvarlama payı eklendi)
+                                if let Some(best) = res
+                                    .result
+                                    .iter()
+                                    .find(|r| r.score >= similarity_threshold && r.score <= 1.01)
+                                {
+                                    let mut signal = TradeSignal {
+                                        symbol: sym_clone.clone(),
+                                        r#type: SignalType::Hold as i32,
+                                        confidence_score: best.score as f64,
+                                        recommended_leverage: 1.0,
+                                        timestamp: ts_clone,
+                                        reason: format!("V4 OMNISCIENCE Match: {:.3}", best.score),
+                                    };
 
-                                        // ENV Tabanlı Karar Motoru
-                                        if z_vel > vel_buy_thresh {
-                                            signal.r#type = SignalType::Buy as i32;
-                                        } else if z_vel < vel_sell_thresh {
-                                            signal.r#type = SignalType::Sell as i32;
-                                        }
+                                    // ENV Tabanlı Karar Motoru
+                                    if z_vel > vel_buy_thresh {
+                                        signal.r#type = SignalType::Buy as i32;
+                                    } else if z_vel < vel_sell_thresh {
+                                        signal.r#type = SignalType::Sell as i32;
+                                    }
 
-                                        if signal.r#type != SignalType::Hold as i32 {
-                                            let _ = nats_pub
-                                                .publish(
-                                                    format!("signal.trade.{}", sym_clone),
-                                                    signal.encode_to_vec().into(),
-                                                )
-                                                .await;
-                                        }
+                                    if signal.r#type != SignalType::Hold as i32 {
+                                        let _ = nats_pub
+                                            .publish(
+                                                format!("signal.trade.{}", sym_clone),
+                                                signal.encode_to_vec().into(),
+                                            )
+                                            .await;
                                     }
                                 }
-                                _ => {} // Timeout veya Hata sessizce yutulur (Graceful Degradation)
                             }
                         });
                     }
