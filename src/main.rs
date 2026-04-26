@@ -138,27 +138,34 @@ async fn main() -> Result<()> {
 
     let q_client = qdrant_opt.context("Qdrant Offline")?;
 
-    // 🔧 CERRAHİ MÜDAHALE: Qdrant koleksiyon kontrolü için sabırlı döngü (Retry Loop)
+    // 🔧 CERRAHİ MÜDAHALE: Qdrant koleksiyon kontrolü için IDEMPOTENT döngü
     info!("🔍 Checking Qdrant collection status...");
     loop {
         match q_client.collection_exists("market_states").await {
             Ok(exists) => {
                 if !exists {
                     info!("🌌 Creating 4D Market State collection...");
-                    if let Err(e) = q_client
+                    match q_client
                         .create_collection(
                             CreateCollectionBuilder::new("market_states")
                                 .vectors_config(VectorParamsBuilder::new(4, Distance::Cosine)),
                         )
                         .await
                     {
-                        warn!("⚠️ Collection creation failed, will retry: {}", e);
-                        sleep(Duration::from_secs(2)).await;
-                        continue;
+                        Ok(_) => info!("✅ Qdrant 4D Vector Space Created."),
+                        Err(e) => {
+                            // Eğer biz oluşturmaya çalışırken başka servis oluşturduysa hata verme, devam et
+                            if e.to_string().contains("already exists") {
+                                info!("ℹ️ Collection was just created by another service, proceeding...");
+                            } else {
+                                warn!("⚠️ Collection creation failed, retrying: {}", e);
+                                sleep(Duration::from_secs(2)).await;
+                                continue;
+                            }
+                        }
                     }
-                    info!("✅ Qdrant 4D Vector Space Ready.");
                 }
-                break; // Başarılı, döngüden çık
+                break; // Koleksiyon var veya başarıyla oluşturuldu, döngüden çık
             }
             Err(e) => {
                 warn!("⏳ Qdrant engine is warming up ({}), retrying in 2s...", e);
