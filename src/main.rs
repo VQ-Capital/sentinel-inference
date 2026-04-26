@@ -84,8 +84,7 @@ impl OnlineZScore {
 struct SymbolNormalizer {
     velocity_z: OnlineZScore,
     imbalance_z: OnlineZScore,
-    sentiment_z: OnlineZScore,
-    urgency_z: OnlineZScore,
+    // 🔥 CERRAHİ: Sentiment ve Urgency için Z-Score motorları KULLANILMIYOR
     vectors_collected: i32,
 }
 
@@ -124,11 +123,11 @@ async fn main() -> Result<()> {
         .parse()?;
 
     let warmup_required: i32 = std::env::var("WARMUP_VECTORS")
-        .unwrap_or_else(|_| "5".to_string()) // 🔥 DÜZELTME: 100 çok uzundu, sistemi 5 pencereye düşürdük
+        .unwrap_or_else(|_| "5".to_string())
         .parse()?;
 
     let similarity_threshold: f32 = std::env::var("SIMILARITY_THRESHOLD")
-        .unwrap_or_else(|_| "0.950".to_string()) // 🔥 DÜZELTME: 0.985 çok katıydı, sinyal yakalayabilmesi için esnetildi
+        .unwrap_or_else(|_| "0.950".to_string())
         .parse()?;
 
     let blindspot_ms: i64 = std::env::var("BLINDSPOT_SEC")
@@ -229,7 +228,6 @@ async fn main() -> Result<()> {
                     } else {
                         0.0
                     };
-                    // 🔥 CERRAHİ DÜZELTME: Semboller UPPPERCASE zorunlu
                     state_ob
                         .write()
                         .await
@@ -247,7 +245,6 @@ async fn main() -> Result<()> {
         if let Ok(mut sub) = nats_int.subscribe("intelligence.news.vector").await {
             while let Some(msg) = sub.next().await {
                 if let Ok(vec) = SemanticVector::decode(msg.payload) {
-                    // 🔥 CERRAHİ DÜZELTME: Semboller UPPPERCASE zorunlu
                     state_int.write().await.sentiment_cache.insert(
                         vec.symbol.to_uppercase(),
                         (vec.sentiment_score, vec.timestamp),
@@ -264,7 +261,6 @@ async fn main() -> Result<()> {
         if let Ok(mut sub) = nats_chain.subscribe("chain.urgency.>").await {
             while let Some(msg) = sub.next().await {
                 if let Ok(event) = ChainUrgencyEvent::decode(msg.payload) {
-                    // 🔥 CERRAHİ DÜZELTME: Semboller UPPPERCASE zorunlu
                     state_chain
                         .write()
                         .await
@@ -281,7 +277,7 @@ async fn main() -> Result<()> {
 
     while let Some(msg) = trade_sub.next().await {
         if let Ok(trade) = AggTrade::decode(msg.payload) {
-            let symbol = trade.symbol.to_uppercase(); // 🔥 CERRAHİ DÜZELTME: Anahtarı sabitle
+            let symbol = trade.symbol.to_uppercase();
 
             let stats = windows.entry(symbol.clone()).or_insert(WindowStats {
                 first_price: trade.price,
@@ -302,7 +298,6 @@ async fn main() -> Result<()> {
 
             if trade.timestamp - stats.window_start_ms >= window_size_ms {
                 if stats.trade_count >= min_ticks {
-                    // 🔥 CERRAHİ DÜZELTME: Sıfıra bölünme koruması
                     let velocity = if stats.first_price > 0.0 {
                         (stats.last_price - stats.first_price) / stats.first_price
                     } else {
@@ -320,7 +315,6 @@ async fn main() -> Result<()> {
                     let ob_imb = *st.orderbook_imbalance.get(&symbol).unwrap_or(&0.0);
                     let (sent, sent_ts) = *st.sentiment_cache.get(&symbol).unwrap_or(&(0.0, 0));
 
-                    // 🔥 CERRAHİ DÜZELTME: sent_ts sıfırsa hesaplamaya sokma, Decay mantığını koru
                     let sentiment = if sent_ts == 0 {
                         0.0
                     } else {
@@ -340,22 +334,28 @@ async fn main() -> Result<()> {
                             .or_insert_with(|| SymbolNormalizer {
                                 velocity_z: OnlineZScore::new(1000),
                                 imbalance_z: OnlineZScore::new(1000),
-                                sentiment_z: OnlineZScore::new(1000),
-                                urgency_z: OnlineZScore::new(1000),
                                 vectors_collected: 0,
                             });
 
                     norm.vectors_collected += 1;
 
+                    // 🔥 CERRAHİ: Sadece organik piyasa verisi Z-Score'a girer
                     let z_vel = norm.velocity_z.update(velocity, z_scale);
                     let z_imb = norm
                         .imbalance_z
                         .update((trade_imb * 0.4) + (ob_imb * 0.6), 1.0);
-                    let z_sent = norm.sentiment_z.update(sentiment, 1.0);
-                    let z_urg = norm.urgency_z.update(urgency, 1.0);
 
-                    let fusion_vector =
-                        vec![z_vel as f32, z_imb as f32, z_sent as f32, z_urg as f32];
+                    // 🔥 CERRAHİ: NLP ve Chain verisi SAF halleriyle eklenir (0 ile 1 arasına veya -1 ile 1 arasına oturtulmuş)
+                    // Bar grafiklerinde görünmesi için küçük bir çarpan ekleyebiliriz (opsiyonel)
+                    let final_sent = sentiment * 3.0; // Terminal UI'da daha rahat görünmesi için görsel çarpan
+                    let final_urgency = urgency * 3.0;
+
+                    let fusion_vector = vec![
+                        z_vel as f32,
+                        z_imb as f32,
+                        final_sent as f32,
+                        final_urgency as f32,
+                    ];
 
                     if norm.vectors_collected >= warmup_required {
                         let q_clone = qdrant.clone();
@@ -425,8 +425,8 @@ async fn main() -> Result<()> {
                         window_end_time: trade.timestamp,
                         price_velocity: z_vel,
                         volume_imbalance: z_imb,
-                        sentiment_score: z_sent,
-                        chain_urgency: z_urg,
+                        sentiment_score: final_sent, // Artık Z-Score değil
+                        chain_urgency: final_urgency, // Artık Z-Score değil
                         embeddings: fusion_vector.iter().map(|&x| x as f64).collect(),
                     };
                     let _ = nats_client
