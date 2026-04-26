@@ -52,26 +52,33 @@ impl OnlineZScore {
     fn new(window: usize) -> Self {
         Self {
             mean: 0.0,
-            variance: 0.0,
+            variance: 1.0, // Sıfıra bölünmeyi engellemek için 1.0
             alpha: 2.0 / (window as f64 + 1.0),
             initialized: false,
         }
     }
-    fn update(&mut self, value: f64) -> f64 {
+
+    // Scale parametresi, mikro küsuratları tam sayı seviyesine çekerek variance kaybını önler
+    fn update(&mut self, mut value: f64, scale: f64) -> f64 {
+        value *= scale;
+
         if !self.initialized {
             self.mean = value;
             self.variance = 1.0;
             self.initialized = true;
             return 0.0;
         }
+
         let diff = value - self.mean;
         self.mean += self.alpha * diff;
         self.variance = (1.0 - self.alpha) * (self.variance + self.alpha * diff * diff);
+
         let std_dev = self.variance.sqrt();
-        if std_dev < 1e-9 {
+        if std_dev < 1e-6 {
             0.0
         } else {
-            (value - self.mean) / std_dev
+            // Z-Skoru -3.0 ile +3.0 arasına sıkıştır (Clamp)
+            ((value - self.mean) / std_dev).clamp(-3.0, 3.0)
         }
     }
 }
@@ -80,14 +87,14 @@ struct SymbolNormalizer {
     velocity_z: OnlineZScore,
     imbalance_z: OnlineZScore,
     sentiment_z: OnlineZScore,
-    urgency_z: OnlineZScore, // ✅ YENİ: 4. Boyut Z-Skoru
+    urgency_z: OnlineZScore,
     vectors_collected: i32,
 }
 
 struct InferenceState {
     sentiment_cache: HashMap<String, (f64, i64)>,
     orderbook_imbalance: HashMap<String, f64>,
-    chain_urgency: HashMap<String, f64>, // ✅ YENİ: Mempool Aciliyeti
+    chain_urgency: HashMap<String, f64>,
     normalizers: HashMap<String, SymbolNormalizer>,
 }
 
@@ -98,6 +105,7 @@ struct InferenceState {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
+    // 🌐 ENV YAPILANDIRMASI (DIŞARIDAN MÜDAHALE EDİLEBİLİR PARAMETRELER)
     let nats_url =
         std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
     let qdrant_url =
@@ -121,7 +129,28 @@ async fn main() -> Result<()> {
         .parse::<i64>()?
         * 1000;
 
-    info!("🧠 VQ-Inference v4.0 [4D OMNISCIENCE MODE] Starting...");
+    // 📈 DİNAMİK QUANT PARAMETRELERİ
+    let z_scale: f64 = std::env::var("Z_SCALE")
+        .unwrap_or_else(|_| "10000.0".to_string())
+        .parse()?;
+    let news_decay_ms: i64 = std::env::var("NEWS_DECAY_MS")
+        .unwrap_or_else(|_| "14400000".to_string())
+        .parse()?; // 4 Saat
+    let vel_buy_thresh: f64 = std::env::var("VELOCITY_BUY_THRESHOLD")
+        .unwrap_or_else(|_| "0.8".to_string())
+        .parse()?;
+    let vel_sell_thresh: f64 = std::env::var("VELOCITY_SELL_THRESHOLD")
+        .unwrap_or_else(|_| "-0.8".to_string())
+        .parse()?;
+    let search_timeout_ms: u64 = std::env::var("SEARCH_TIMEOUT_MS")
+        .unwrap_or_else(|_| "25".to_string())
+        .parse()?;
+
+    info!("🧠 VQ-Inference v4.1 [ENV CONTROLLED OMNISCIENCE] Starting...");
+    info!(
+        "⚙️ Params -> Z_SCALE: {}, BUY_TH: {}, SELL_TH: {}",
+        z_scale, vel_buy_thresh, vel_sell_thresh
+    );
 
     let nats_client = async_nats::connect(&nats_url).await.context("NATS Error")?;
 
@@ -138,7 +167,6 @@ async fn main() -> Result<()> {
 
     let q_client = qdrant_opt.context("Qdrant Offline")?;
 
-    // 🔧 CERRAHİ MÜDAHALE: Qdrant koleksiyon kontrolü için IDEMPOTENT döngü
     info!("🔍 Checking Qdrant collection status...");
     loop {
         match q_client.collection_exists("market_states").await {
@@ -154,7 +182,6 @@ async fn main() -> Result<()> {
                     {
                         Ok(_) => info!("✅ Qdrant 4D Vector Space Created."),
                         Err(e) => {
-                            // Eğer biz oluşturmaya çalışırken başka servis oluşturduysa hata verme, devam et
                             if e.to_string().contains("already exists") {
                                 info!("ℹ️ Collection was just created by another service, proceeding...");
                             } else {
@@ -165,7 +192,7 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                break; // Koleksiyon var veya başarıyla oluşturuldu, döngüden çık
+                break;
             }
             Err(e) => {
                 warn!("⏳ Qdrant engine is warming up ({}), retrying in 2s...", e);
@@ -224,7 +251,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // 📡 CHAIN URGENCY (MEMPOOL) MONITOR - YENİ!
+    // 📡 CHAIN URGENCY (MEMPOOL) MONITOR
     let nats_chain = nats_client.clone();
     let state_chain = state.clone();
     tokio::spawn(async move {
@@ -278,12 +305,15 @@ async fn main() -> Result<()> {
                     let mut st = state.write().await;
                     let ob_imb = *st.orderbook_imbalance.get(&symbol).unwrap_or(&0.0);
                     let (sent, sent_ts) = *st.sentiment_cache.get(&symbol).unwrap_or(&(0.0, 0));
-                    let sentiment = if trade.timestamp - sent_ts < 3600000 {
-                        sent
+
+                    let time_diff = trade.timestamp - sent_ts;
+                    let sentiment = if time_diff < news_decay_ms {
+                        sent * (1.0 - (time_diff as f64 / news_decay_ms as f64))
                     } else {
                         0.0
                     };
-                    let urgency = *st.chain_urgency.get(&symbol).unwrap_or(&0.0); // ✅ 4. Boyut Verisi
+
+                    let urgency = *st.chain_urgency.get(&symbol).unwrap_or(&0.0);
 
                     let norm =
                         st.normalizers
@@ -297,12 +327,15 @@ async fn main() -> Result<()> {
                             });
 
                     norm.vectors_collected += 1;
-                    let z_vel = norm.velocity_z.update(velocity);
-                    let z_imb = norm.imbalance_z.update((trade_imb * 0.4) + (ob_imb * 0.6));
-                    let z_sent = norm.sentiment_z.update(sentiment);
-                    let z_urg = norm.urgency_z.update(urgency); // ✅ 4. Boyut Normalize Edildi
 
-                    // 🌌 4 BOYUTLU FÜZYON VEKTÖRÜ
+                    // DEAD CODE HATASINI ÇÖZEN KISIM (Hepsi update'e giriyor)
+                    let z_vel = norm.velocity_z.update(velocity, z_scale);
+                    let z_imb = norm
+                        .imbalance_z
+                        .update((trade_imb * 0.4) + (ob_imb * 0.6), 1.0); // Zaten -1 ile +1 arası
+                    let z_sent = norm.sentiment_z.update(sentiment, 1.0);
+                    let z_urg = norm.urgency_z.update(urgency, 1.0);
+
                     let fusion_vector =
                         vec![z_vel as f32, z_imb as f32, z_sent as f32, z_urg as f32];
 
@@ -325,20 +358,20 @@ async fn main() -> Result<()> {
                                 ),
                             ]);
 
-                            // 🔧 CERRAHİ MÜDAHALE: Qdrant sorgusuna 15ms SLA Timeout eklendi!
                             let search_future = q_clone.search_points(
                                 SearchPointsBuilder::new("market_states", v_clone, 3)
                                     .filter(filter)
                                     .with_payload(true),
                             );
 
-                            match timeout(Duration::from_millis(15), search_future).await {
+                            match timeout(Duration::from_millis(search_timeout_ms), search_future)
+                                .await
+                            {
                                 Ok(Ok(res)) => {
-                                    if let Some(best) = res
-                                        .result
-                                        .iter()
-                                        .find(|r| r.score >= similarity_threshold && r.score < 1.0)
-                                    {
+                                    // KOSİNÜS TUZAĞI DÜZELTİLDİ: 1.01 (Yuvarlama payı eklendi)
+                                    if let Some(best) = res.result.iter().find(|r| {
+                                        r.score >= similarity_threshold && r.score <= 1.01
+                                    }) {
                                         let mut signal = TradeSignal {
                                             symbol: sym_clone.clone(),
                                             r#type: SignalType::Hold as i32,
@@ -350,9 +383,11 @@ async fn main() -> Result<()> {
                                                 best.score
                                             ),
                                         };
-                                        if z_vel > 1.2 {
+
+                                        // ENV Tabanlı Karar Motoru
+                                        if z_vel > vel_buy_thresh {
                                             signal.r#type = SignalType::Buy as i32;
-                                        } else if z_vel < -1.2 {
+                                        } else if z_vel < vel_sell_thresh {
                                             signal.r#type = SignalType::Sell as i32;
                                         }
 
@@ -366,19 +401,12 @@ async fn main() -> Result<()> {
                                         }
                                     }
                                 }
-                                Ok(Err(e)) => {
-                                    // Qdrant iç hatası (Bağlantı koptu vb.)
-                                    tracing::error!("🔴 [QDRANT FAULT] Arama başarısız: {}", e);
-                                }
-                                Err(_) => {
-                                    // SLA İhlali (Graceful Degradation) - Taskı iptal et ve yut!
-                                    tracing::warn!("⏳ [SLA BREACH] Qdrant 15ms içinde yanıt vermedi. Vektör düştü (Dropped)!");
-                                }
+                                _ => {} // Timeout veya Hata sessizce yutulur (Graceful Degradation)
                             }
                         });
                     }
 
-                    // NATS'A YENİ DURUMU BAS (Grafana için)
+                    // NATS'A YENİ DURUMU BAS (Grafana ve Terminal için)
                     let state_msg = MarketStateVector {
                         symbol: symbol.clone(),
                         window_start_time: stats.window_start_ms,
@@ -396,6 +424,7 @@ async fn main() -> Result<()> {
                         )
                         .await;
                 }
+
                 *stats = WindowStats {
                     first_price: trade.price,
                     last_price: trade.price,
