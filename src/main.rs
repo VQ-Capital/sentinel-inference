@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout, Duration};
-use tracing::info;
+use tracing::{info, warn};
 
 pub mod sentinel_protos {
     pub mod market {
@@ -135,20 +135,40 @@ async fn main() -> Result<()> {
         }
         sleep(Duration::from_secs(2)).await;
     }
+
     let q_client = qdrant_opt.context("Qdrant Offline")?;
 
-    // ✅ DİKKAT: Vektör boyutu 3'ten 4'e çıkarıldı!
-    if !q_client.collection_exists("market_states").await? {
-        q_client
-            .create_collection(
-                CreateCollectionBuilder::new("market_states")
-                    .vectors_config(VectorParamsBuilder::new(4, Distance::Cosine)), // 4 boyutlu V4 Omniscience
-            )
-            .await?;
-        info!("🌌 Qdrant 4D Vector Space Created.");
+    // 🔧 CERRAHİ MÜDAHALE: Qdrant koleksiyon kontrolü için sabırlı döngü (Retry Loop)
+    info!("🔍 Checking Qdrant collection status...");
+    loop {
+        match q_client.collection_exists("market_states").await {
+            Ok(exists) => {
+                if !exists {
+                    info!("🌌 Creating 4D Market State collection...");
+                    if let Err(e) = q_client
+                        .create_collection(
+                            CreateCollectionBuilder::new("market_states")
+                                .vectors_config(VectorParamsBuilder::new(4, Distance::Cosine)),
+                        )
+                        .await
+                    {
+                        warn!("⚠️ Collection creation failed, will retry: {}", e);
+                        sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
+                    info!("✅ Qdrant 4D Vector Space Ready.");
+                }
+                break; // Başarılı, döngüden çık
+            }
+            Err(e) => {
+                warn!("⏳ Qdrant engine is warming up ({}), retrying in 2s...", e);
+                sleep(Duration::from_secs(2)).await;
+            }
+        }
     }
 
     let qdrant = Arc::new(q_client);
+
     let state = Arc::new(RwLock::new(InferenceState {
         sentiment_cache: HashMap::new(),
         orderbook_imbalance: HashMap::new(),
