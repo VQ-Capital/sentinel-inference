@@ -1,7 +1,7 @@
 # ========== DOSYA: sentinel-inference/Cargo.toml ==========
 [package]
 name = "sentinel-inference"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 
 [dependencies]

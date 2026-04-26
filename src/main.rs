@@ -52,13 +52,12 @@ impl OnlineZScore {
     fn new(window: usize) -> Self {
         Self {
             mean: 0.0,
-            variance: 1.0, // Sıfıra bölünmeyi engellemek için 1.0
+            variance: 1.0,
             alpha: 2.0 / (window as f64 + 1.0),
             initialized: false,
         }
     }
 
-    // Scale parametresi, mikro küsuratları tam sayı seviyesine çekerek variance kaybını önler
     fn update(&mut self, mut value: f64, scale: f64) -> f64 {
         value *= scale;
 
@@ -77,7 +76,6 @@ impl OnlineZScore {
         if std_dev < 1e-6 {
             0.0
         } else {
-            // Z-Skoru -3.0 ile +3.0 arasına sıkıştır (Clamp)
             ((value - self.mean) / std_dev).clamp(-3.0, 3.0)
         }
     }
@@ -105,7 +103,12 @@ struct InferenceState {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    // 🌐 ENV YAPILANDIRMASI (DIŞARIDAN MÜDAHALE EDİLEBİLİR PARAMETRELER)
+    info!(
+        "📡 Service: {} | Version: {}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
+
     let nats_url =
         std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
     let qdrant_url =
@@ -115,38 +118,44 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "30".to_string())
         .parse::<i64>()?
         * 1000;
+
     let min_ticks: i64 = std::env::var("MIN_TICKS")
         .unwrap_or_else(|_| "25".to_string())
         .parse()?;
+
     let warmup_required: i32 = std::env::var("WARMUP_VECTORS")
-        .unwrap_or_else(|_| "100".to_string())
+        .unwrap_or_else(|_| "5".to_string()) // 🔥 DÜZELTME: 100 çok uzundu, sistemi 5 pencereye düşürdük
         .parse()?;
+
     let similarity_threshold: f32 = std::env::var("SIMILARITY_THRESHOLD")
-        .unwrap_or_else(|_| "0.985".to_string())
+        .unwrap_or_else(|_| "0.950".to_string()) // 🔥 DÜZELTME: 0.985 çok katıydı, sinyal yakalayabilmesi için esnetildi
         .parse()?;
+
     let blindspot_ms: i64 = std::env::var("BLINDSPOT_SEC")
         .unwrap_or_else(|_| "900".to_string())
         .parse::<i64>()?
         * 1000;
 
-    // 📈 DİNAMİK QUANT PARAMETRELERİ
     let z_scale: f64 = std::env::var("Z_SCALE")
         .unwrap_or_else(|_| "10000.0".to_string())
         .parse()?;
+
     let news_decay_ms: i64 = std::env::var("NEWS_DECAY_MS")
         .unwrap_or_else(|_| "14400000".to_string())
-        .parse()?; // 4 Saat
+        .parse()?;
+
     let vel_buy_thresh: f64 = std::env::var("VELOCITY_BUY_THRESHOLD")
         .unwrap_or_else(|_| "0.8".to_string())
         .parse()?;
+
     let vel_sell_thresh: f64 = std::env::var("VELOCITY_SELL_THRESHOLD")
         .unwrap_or_else(|_| "-0.8".to_string())
         .parse()?;
+
     let search_timeout_ms: u64 = std::env::var("SEARCH_TIMEOUT_MS")
         .unwrap_or_else(|_| "25".to_string())
         .parse()?;
 
-    info!("🧠 VQ-Inference v4.1 [ENV CONTROLLED OMNISCIENCE] Starting...");
     info!(
         "⚙️ Params -> Z_SCALE: {}, BUY_TH: {}, SELL_TH: {}",
         z_scale, vel_buy_thresh, vel_sell_thresh
@@ -167,12 +176,10 @@ async fn main() -> Result<()> {
 
     let q_client = qdrant_opt.context("Qdrant Offline")?;
 
-    info!("🔍 Checking Qdrant collection status...");
     loop {
         match q_client.collection_exists("market_states").await {
             Ok(exists) => {
                 if !exists {
-                    info!("🌌 Creating 4D Market State collection...");
                     match q_client
                         .create_collection(
                             CreateCollectionBuilder::new("market_states")
@@ -182,10 +189,8 @@ async fn main() -> Result<()> {
                     {
                         Ok(_) => info!("✅ Qdrant 4D Vector Space Created."),
                         Err(e) => {
-                            if e.to_string().contains("already exists") {
-                                info!("ℹ️ Collection was just created by another service, proceeding...");
-                            } else {
-                                warn!("⚠️ Collection creation failed, retrying: {}", e);
+                            if !e.to_string().contains("already exists") {
+                                warn!("⚠️ Collection creation failed: {}", e);
                                 sleep(Duration::from_secs(2)).await;
                                 continue;
                             }
@@ -195,7 +200,7 @@ async fn main() -> Result<()> {
                 break;
             }
             Err(e) => {
-                warn!("⏳ Qdrant engine is warming up ({}), retrying in 2s...", e);
+                warn!("⏳ Qdrant engine warming up ({}), retrying...", e);
                 sleep(Duration::from_secs(2)).await;
             }
         }
@@ -224,11 +229,12 @@ async fn main() -> Result<()> {
                     } else {
                         0.0
                     };
+                    // 🔥 CERRAHİ DÜZELTME: Semboller UPPPERCASE zorunlu
                     state_ob
                         .write()
                         .await
                         .orderbook_imbalance
-                        .insert(depth.symbol, imb);
+                        .insert(depth.symbol.to_uppercase(), imb);
                 }
             }
         }
@@ -241,11 +247,11 @@ async fn main() -> Result<()> {
         if let Ok(mut sub) = nats_int.subscribe("intelligence.news.vector").await {
             while let Some(msg) = sub.next().await {
                 if let Ok(vec) = SemanticVector::decode(msg.payload) {
-                    state_int
-                        .write()
-                        .await
-                        .sentiment_cache
-                        .insert(vec.symbol, (vec.sentiment_score, vec.timestamp));
+                    // 🔥 CERRAHİ DÜZELTME: Semboller UPPPERCASE zorunlu
+                    state_int.write().await.sentiment_cache.insert(
+                        vec.symbol.to_uppercase(),
+                        (vec.sentiment_score, vec.timestamp),
+                    );
                 }
             }
         }
@@ -258,11 +264,12 @@ async fn main() -> Result<()> {
         if let Ok(mut sub) = nats_chain.subscribe("chain.urgency.>").await {
             while let Some(msg) = sub.next().await {
                 if let Ok(event) = ChainUrgencyEvent::decode(msg.payload) {
+                    // 🔥 CERRAHİ DÜZELTME: Semboller UPPPERCASE zorunlu
                     state_chain
                         .write()
                         .await
                         .chain_urgency
-                        .insert(event.symbol, event.urgency_score);
+                        .insert(event.symbol.to_uppercase(), event.urgency_score);
                 }
             }
         }
@@ -274,7 +281,8 @@ async fn main() -> Result<()> {
 
     while let Some(msg) = trade_sub.next().await {
         if let Ok(trade) = AggTrade::decode(msg.payload) {
-            let symbol = trade.symbol.clone();
+            let symbol = trade.symbol.to_uppercase(); // 🔥 CERRAHİ DÜZELTME: Anahtarı sabitle
+
             let stats = windows.entry(symbol.clone()).or_insert(WindowStats {
                 first_price: trade.price,
                 last_price: trade.price,
@@ -294,7 +302,13 @@ async fn main() -> Result<()> {
 
             if trade.timestamp - stats.window_start_ms >= window_size_ms {
                 if stats.trade_count >= min_ticks {
-                    let velocity = (stats.last_price - stats.first_price) / stats.first_price;
+                    // 🔥 CERRAHİ DÜZELTME: Sıfıra bölünme koruması
+                    let velocity = if stats.first_price > 0.0 {
+                        (stats.last_price - stats.first_price) / stats.first_price
+                    } else {
+                        0.0
+                    };
+
                     let trade_imb = if (stats.buy_volume + stats.sell_volume) > 0.0 {
                         (stats.buy_volume - stats.sell_volume)
                             / (stats.buy_volume + stats.sell_volume)
@@ -306,11 +320,16 @@ async fn main() -> Result<()> {
                     let ob_imb = *st.orderbook_imbalance.get(&symbol).unwrap_or(&0.0);
                     let (sent, sent_ts) = *st.sentiment_cache.get(&symbol).unwrap_or(&(0.0, 0));
 
-                    let time_diff = trade.timestamp - sent_ts;
-                    let sentiment = if time_diff < news_decay_ms {
-                        sent * (1.0 - (time_diff as f64 / news_decay_ms as f64))
-                    } else {
+                    // 🔥 CERRAHİ DÜZELTME: sent_ts sıfırsa hesaplamaya sokma, Decay mantığını koru
+                    let sentiment = if sent_ts == 0 {
                         0.0
+                    } else {
+                        let time_diff = trade.timestamp - sent_ts;
+                        if time_diff < news_decay_ms && time_diff >= 0 {
+                            sent * (1.0 - (time_diff as f64 / news_decay_ms as f64))
+                        } else {
+                            0.0
+                        }
                     };
 
                     let urgency = *st.chain_urgency.get(&symbol).unwrap_or(&0.0);
@@ -363,12 +382,10 @@ async fn main() -> Result<()> {
                                     .with_payload(true),
                             );
 
-                            // CLIPPY SINGLE-MATCH UYARISINI ÇÖZEN YAPI
                             if let Ok(Ok(res)) =
                                 timeout(Duration::from_millis(search_timeout_ms), search_future)
                                     .await
                             {
-                                // KOSİNÜS TUZAĞI DÜZELTİLDİ: 1.01 (Yuvarlama payı eklendi)
                                 if let Some(best) = res
                                     .result
                                     .iter()
@@ -383,7 +400,6 @@ async fn main() -> Result<()> {
                                         reason: format!("V4 OMNISCIENCE Match: {:.3}", best.score),
                                     };
 
-                                    // ENV Tabanlı Karar Motoru
                                     if z_vel > vel_buy_thresh {
                                         signal.r#type = SignalType::Buy as i32;
                                     } else if z_vel < vel_sell_thresh {
@@ -403,7 +419,6 @@ async fn main() -> Result<()> {
                         });
                     }
 
-                    // NATS'A YENİ DURUMU BAS (Grafana ve Terminal için)
                     let state_msg = MarketStateVector {
                         symbol: symbol.clone(),
                         window_start_time: stats.window_start_ms,
