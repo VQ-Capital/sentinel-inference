@@ -134,19 +134,19 @@ impl PureMathModel {
         // 12 Özellik x 3 Çıktı (Hold, Buy, Sell)
         // Hard-Coded Finansal Ağırlıklar (Makine Öğrenmesi Simülasyonu)
         let weights_data = vec![
-            // HOLD,  BUY,   SELL
-            0.0, 0.5, -0.5, // F0: Price Velocity (Z-Score)
-            0.0, 0.4, -0.4, // F1: Orderbook Imbalance
-            0.0, 0.3, -0.3, // F2: Neural Sentiment
-            0.0, -0.1, 0.1, // F3: Chain Urgency (Yüksek -> Panik Satışı)
-            0.0, -0.2, 0.2, // F4: RSI
-            0.1, -0.1, -0.1, // F5: Volatility
-            0.0, 0.2, -0.2, // F6: Taker Ratio
-            0.0, 0.1, -0.1, // F7: Intensity
-            0.0, -0.2, 0.2, // F8: Position in Range
-            0.0, 0.1, -0.1, // F9: Orderbook Depth
-            0.0, 0.0, 0.0, // F10: Time Sine
-            0.0, 0.0, 0.0, // F11: Last Close
+            //  HOLD,    BUY,    SELL
+             0.0000,  0.5000,  -0.5000, // F0: Price Velocity (Z-Score)
+             0.0000,  0.4000,  -0.4000, // F1: Orderbook Imbalance
+             0.0000,  0.3000,  -0.3000, // F2: Neural Sentiment
+             0.0000,  -0.1000,  0.1000, // F3: Chain Urgency
+             0.0000,  -0.2000,  0.2000, // F4: RSI
+             0.1000,  -0.1000,  -0.1000, // F5: Volatility
+             0.0000,  0.2000,  -0.2000, // F6: Taker Ratio
+             0.0000,  0.1000,  -0.1000, // F7: Intensity (Tick count)
+             0.0000,  -0.2000,  0.2000, // F8: Position in Range
+             0.0000,  0.1000,  -0.1000, // F9: Orderbook Depth
+             0.0000,  0.0000,  0.0000, // F10: Time Sine (Intraday)
+             0.0000,  0.0000,  0.0000, // F11: Last Close Price
         ];
 
         let weights = Array2::from_shape_vec((12, 3), weights_data)
