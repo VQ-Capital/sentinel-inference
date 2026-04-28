@@ -1,25 +1,29 @@
-# ========== DOSYA: Dockerfile (İlgili her repo için) ==========
-# 1. Derleme Aşaması
-FROM rust:1.95-slim-bookworm AS builder
+# ========== DOSYA: sentinel-inference/Dockerfile ==========
 
-# Sistem bağımlılıkları (Protobuf derleyicisi için şart)
-RUN apt-get update && apt-get install -y protobuf-compiler pkg-config libssl-dev
+# 1. AŞAMA: RUST DERLEYİCİSİ (PURE RUST BUILDER)
+FROM rust:1.95-slim-bookworm AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app
 COPY . .
-
-# Release derlemesi
 RUN cargo build --release
 
-# 2. Çalıştırma Aşaması (Tertemiz ve Küçük)
+# 2. AŞAMA: ÜRETİM ORTAMI (ZERO C++ DEPENDENCY & NATIVE SPEED)
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y \
+    libssl3 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-# Binaries ismini her repoya göre cargo build çıktısından kopyalar
-# sentinel-ingest için: sentinel-ingest, sentinel-storage için: sentinel-storage vb.
-COPY --from=builder /usr/src/app/target/release/sentinel-* .
 
-# ÇALIŞTIRMA KOMUTU (Not: Servis adını buraya manuel yazmalısın veya docker-compose command kullanmalısın)
-# Biz docker-compose içinde belirteceğiz.
+# Binary'yi kopyalıyoruz
+COPY --from=builder /usr/src/app/target/release/sentinel-inference .
+
+ENV OMP_NUM_THREADS=1
+
+CMD ["./sentinel-inference"]

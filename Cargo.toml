@@ -1,8 +1,9 @@
+# ========== DOSYA: sentinel-inference/Cargo.toml ==========
 [package]
 name = "sentinel-inference"
-version = "4.0.1"
+version = "5.0.0"
 edition = "2021"
-description = "VQ-Capital V4 Omniscience Neural Engine (ONNX/12D)"
+description = "VQ-Capital V5 Pure Rust Omniscience Engine (12D/ndarray)"
 
 [dependencies]
 # HFT Async Runtime
@@ -20,9 +21,8 @@ futures-util = "0.3"
 qdrant-client = "1.10"
 uuid = { version = "1.7", features = ["v4"] }
 
-# 🚀 ML ENTEGRASYONU (FAZ 3)
-# CERRAHİ: ndarray paketi versiyon çakışmasını önlemek için silindi.
-ort = { version = "2.0.0-rc.9", features = ["cuda"] } 
+# 🚀 V5 PURE RUST ML ENTEGRASYONU (C++ BINDING YOK)
+ndarray = "0.15"
 
 [build-dependencies]
 prost-build = "0.12"
