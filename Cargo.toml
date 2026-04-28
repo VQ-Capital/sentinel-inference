@@ -1,8 +1,8 @@
-# ========== DOSYA: sentinel-inference/Cargo.toml ==========
 [package]
 name = "sentinel-inference"
-version = "0.9.5"
+version = "4.0.1"
 edition = "2021"
+description = "VQ-Capital V4 Omniscience Neural Engine (ONNX/12D)"
 
 [dependencies]
 # HFT Async Runtime
@@ -16,11 +16,14 @@ tracing-subscriber = "0.3"
 chrono = "0.4"
 futures-util = "0.3"
 
-# Vektör DB & Matematik
+# Vektör DB
 qdrant-client = "1.10"
 uuid = { version = "1.7", features = ["v4"] }
 
+# 🚀 ML ENTEGRASYONU (FAZ 3)
+# CERRAHİ: ndarray paketi versiyon çakışmasını önlemek için silindi.
+ort = { version = "2.0.0-rc.9", features = ["cuda"] } 
+
 [build-dependencies]
-# Protobuf derleme araçları (build.rs için şart)
 prost-build = "0.12"
 tonic-build = "0.11"
