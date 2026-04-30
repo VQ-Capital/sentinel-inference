@@ -12,6 +12,12 @@ use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout, Duration};
 use tracing::{info, warn};
 
+mod config;
+mod weights;
+
+use config::AppConfig;
+use weights::get_dna_weights;
+
 pub mod sentinel_protos {
     pub mod market {
         include!(concat!(env!("OUT_DIR"), "/sentinel.market.v1.rs"));
@@ -46,7 +52,6 @@ struct RollingWindow {
     current_sec: i64,
     last_signal_ms: i64,
 }
-
 impl RollingWindow {
     fn new() -> Self {
         Self {
@@ -69,7 +74,6 @@ struct OnlineZScore {
     alpha: f64,
     initialized: bool,
 }
-
 impl OnlineZScore {
     fn new(window: usize) -> Self {
         Self {
@@ -103,7 +107,6 @@ struct SymbolNormalizer {
     z_scores: Vec<OnlineZScore>,
     vectors_collected: i32,
 }
-
 impl SymbolNormalizer {
     fn new() -> Self {
         Self {
@@ -121,47 +124,22 @@ struct InferenceState {
     normalizers: HashMap<String, SymbolNormalizer>,
 }
 
-// -----------------------------------------------------------------------------
-// 🧠 PURE RUST (NDARRAY) MATH ENGINE (ZERO-ALLOCATION HOT PATH)
-// -----------------------------------------------------------------------------
 struct PureMathModel {
     weights: Array2<f32>,
     biases: Array1<f32>,
 }
-
 impl PureMathModel {
     fn new() -> Result<Self> {
-        // 12 Özellik x 3 Çıktı (Hold, Buy, Sell)
-        // Hard-Coded Finansal Ağırlıklar (Makine Öğrenmesi Simülasyonu)
-        let weights_data = vec![
-            //  HOLD,    BUY,    SELL
-             0.2014,  0.3419,  -0.3875, // F0: Price Velocity (Z-Score)
-             -0.0571,  0.6251,  -0.4000, // F1: Orderbook Imbalance
-             -0.2874,  -0.1460,  -0.4871, // F2: Neural Sentiment
-             -0.3496,  -0.3786,  -0.2330, // F3: Chain Urgency
-             -0.2739,  -0.3713,  -0.0890, // F4: RSI
-             0.2163,  -0.1000,  -0.2741, // F5: Volatility
-             0.0000,  0.2000,  -0.2566, // F6: Taker Ratio
-             -0.1753,  0.4122,  -0.3247, // F7: Intensity (Tick count)
-             0.2864,  -0.3848,  0.4565, // F8: Position in Range
-             0.1565,  0.2834,  -0.0986, // F9: Orderbook Depth
-             -0.0532,  0.4870,  0.0270, // F10: Time Sine (Intraday)
-             0.0000,  -0.1838,  -0.0717, // F11: Last Close Price
-        ];
-
-        let weights = Array2::from_shape_vec((12, 3), weights_data)
-            .context("Ağırlık matrisi oluşturulamadı (Pure Math Model)")?;
-
-        let biases = Array1::from_vec(vec![0.5, -0.1, -0.1]); // Varsayılan olarak HOLD eğilimi
-
+        let weights_data = get_dna_weights();
+        let weights =
+            Array2::from_shape_vec((12, 3), weights_data).context("Weight Matrix Error")?;
+        let biases = Array1::from_vec(vec![0.5, -0.1, -0.1]);
         Ok(Self { weights, biases })
     }
 
     fn predict(&self, features: &[f32; 12]) -> (SignalType, f64) {
         let input = Array1::from_vec(features.to_vec());
         let logits = input.dot(&self.weights) + &self.biases;
-
-        // Softmax Hesaplaması
         let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let exp_logits = logits.mapv(|x| (x - max_logit).exp());
         let sum_exp = exp_logits.sum();
@@ -184,36 +162,20 @@ impl PureMathModel {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+    let config = AppConfig::from_env();
+
     info!(
-        "📡 Service: {} | Version: {} (V5 PURE RUST / NDARRAY EDITION)",
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION")
+        "📡 Service: {} | Version: 5.3.0 (V7 MODULAR AI)",
+        env!("CARGO_PKG_NAME")
     );
 
-    let nats_url =
-        std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
-    let qdrant_url =
-        std::env::var("QDRANT_URL").unwrap_or_else(|_| "http://localhost:6333".to_string());
+    let nats_client = async_nats::connect(&config.nats_url)
+        .await
+        .context("NATS Error")?;
 
-    let min_ticks: i64 = std::env::var("MIN_TICKS")
-        .unwrap_or_else(|_| "25".to_string())
-        .parse()?;
-    let warmup_required: i32 = std::env::var("WARMUP_VECTORS")
-        .unwrap_or_else(|_| "5".to_string())
-        .parse()?;
-    let z_scale: f64 = std::env::var("Z_SCALE")
-        .unwrap_or_else(|_| "10000.0".to_string())
-        .parse()?;
-    let ai_timeout_ms: u64 = std::env::var("AI_TIMEOUT_MS")
-        .unwrap_or_else(|_| "25".to_string())
-        .parse()?;
-
-    let nats_client = async_nats::connect(&nats_url).await.context("NATS Error")?;
-
-    // 1. QDRANT BAZLI HAFIZA (12D)
     let mut qdrant_opt = None;
     for _ in 0..10 {
-        if let Ok(client) = Qdrant::from_url(&qdrant_url).build() {
+        if let Ok(client) = Qdrant::from_url(&config.qdrant_url).build() {
             if client.health_check().await.is_ok() {
                 qdrant_opt = Some(client);
                 break;
@@ -224,22 +186,19 @@ async fn main() -> Result<()> {
     let q_client = qdrant_opt.context("Qdrant Offline")?;
 
     if !q_client
-        .collection_exists("market_states_12d")
+        .collection_exists(&config.qdrant_collection)
         .await
         .unwrap_or(false)
     {
         let _ = q_client
             .create_collection(
-                CreateCollectionBuilder::new("market_states_12d")
+                CreateCollectionBuilder::new(&config.qdrant_collection)
                     .vectors_config(VectorParamsBuilder::new(12, Distance::Cosine)),
             )
             .await;
     }
 
-    // 2. SAF RUST (NDARRAY) MATEMATİK MOTORU İNŞASI
     let math_model = Arc::new(PureMathModel::new()?);
-    info!("🧠 PURE RUST NDARRAY MATRIX ENGINE Yüklendi ve Hazır!");
-
     let state = Arc::new(RwLock::new(InferenceState {
         sentiment_cache: HashMap::new(),
         orderbook_imbalance: HashMap::new(),
@@ -248,7 +207,6 @@ async fn main() -> Result<()> {
         normalizers: HashMap::new(),
     }));
 
-    // ORDERBOOK LISTENER
     let nats_ob = nats_client.clone();
     let state_ob = state.clone();
     tokio::spawn(async move {
@@ -272,7 +230,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // SENTIMENT LISTENER
     let nats_int = nats_client.clone();
     let state_int = state.clone();
     tokio::spawn(async move {
@@ -288,21 +245,9 @@ async fn main() -> Result<()> {
         }
     });
 
-    // CHAIN URGENCY LISTENER
-    let nats_chain = nats_client.clone();
-    let _state_chain = state.clone();
-    tokio::spawn(async move {
-        if let Ok(mut sub) = nats_chain.subscribe("chain.urgency.>").await {
-            while let Some(_msg) = sub.next().await {
-                // Placeholder for future chain parsing logic
-            }
-        }
-    });
-
     let mut trade_sub = nats_client.subscribe("market.trade.>").await?;
     let mut rolling_windows: HashMap<String, RollingWindow> = HashMap::new();
 
-    // 3. HOT-PATH: MAIN TICK PROCESSOR
     while let Some(msg) = trade_sub.next().await {
         if let Ok(trade) = AggTrade::decode(msg.payload) {
             let symbol = trade.symbol.to_uppercase();
@@ -323,7 +268,6 @@ async fn main() -> Result<()> {
                 if window.buckets.len() > 60 {
                     window.buckets.pop_front();
                 }
-
                 window.current_sec = current_sec;
                 window.current_bucket = Bucket {
                     open: trade.price,
@@ -351,7 +295,6 @@ async fn main() -> Result<()> {
                     let mut lowest = f64::MAX;
                     let mut gains = 0.0;
                     let mut losses = 0.0;
-
                     let mut prev_close = first_open;
 
                     for b in window.buckets.iter() {
@@ -364,7 +307,6 @@ async fn main() -> Result<()> {
                         if b.low < lowest {
                             lowest = b.low;
                         }
-
                         let change = b.close - prev_close;
                         if change > 0.0 {
                             gains += change;
@@ -374,7 +316,7 @@ async fn main() -> Result<()> {
                         prev_close = b.close;
                     }
 
-                    if total_ticks >= min_ticks {
+                    if total_ticks >= config.min_ticks {
                         let velocity = if first_open > 0.0 {
                             (last_close - first_open) / first_open
                         } else {
@@ -431,15 +373,14 @@ async fn main() -> Result<()> {
                             .or_insert_with(SymbolNormalizer::new);
                         norm.vectors_collected += 1;
 
-                        // 12 Boyutlu Z-Score Normalizasyonu (Sırasıyla)
                         let mut features = [0.0f32; 12];
-                        features[0] = norm.z_scores[0].update(velocity, z_scale) as f32;
+                        features[0] = norm.z_scores[0].update(velocity, config.z_scale) as f32;
                         features[1] =
                             norm.z_scores[1].update((trade_imb * 0.4) + (ob_imb * 0.6), 1.0) as f32;
                         features[2] = norm.z_scores[2].update(sentiment, 1.0) as f32;
                         features[3] = norm.z_scores[3].update(urgency, 1.0) as f32;
                         features[4] = norm.z_scores[4].update(rsi, 1.0) as f32;
-                        features[5] = norm.z_scores[5].update(volatility, z_scale) as f32;
+                        features[5] = norm.z_scores[5].update(volatility, config.z_scale) as f32;
                         features[6] = norm.z_scores[6].update(taker_ratio, 1.0) as f32;
                         features[7] = norm.z_scores[7].update(intensity, 1.0) as f32;
                         features[8] = norm.z_scores[8].update(position_in_range, 1.0) as f32;
@@ -468,21 +409,23 @@ async fn main() -> Result<()> {
                                 .await;
                         }
 
-                        // 🔥 PURE RUST MATRIX INFERENCE (SLA TIMEOUT KORUMALI)
-                        if norm.vectors_collected >= warmup_required
-                            && (trade.timestamp - window.last_signal_ms >= 15_000)
+                        if norm.vectors_collected >= config.warmup_vectors
+                            && (trade.timestamp - window.last_signal_ms
+                                >= config.min_signal_interval_ms)
                         {
                             let model_clone = math_model.clone();
                             let features_clone = features;
                             let nats_pub = nats_client.clone();
                             let sym_clone = symbol.clone();
                             let ts_clone = trade.timestamp;
+                            let timeout_val = config.ai_timeout_ms;
+                            let min_conf = config.min_confidence_score;
 
                             window.last_signal_ms = trade.timestamp;
 
                             tokio::spawn(async move {
                                 let ai_result = timeout(
-                                    Duration::from_millis(ai_timeout_ms),
+                                    Duration::from_millis(timeout_val),
                                     tokio::task::spawn_blocking(move || {
                                         model_clone.predict(&features_clone)
                                     }),
@@ -491,7 +434,8 @@ async fn main() -> Result<()> {
 
                                 match ai_result {
                                     Ok(Ok((signal_type, confidence))) => {
-                                        if signal_type != SignalType::Hold && confidence > 0.65 {
+                                        if signal_type != SignalType::Hold && confidence > min_conf
+                                        {
                                             let signal = TradeSignal {
                                                 symbol: sym_clone.clone(),
                                                 r#type: signal_type as i32,
@@ -499,11 +443,10 @@ async fn main() -> Result<()> {
                                                 recommended_leverage: 1.0,
                                                 timestamp: ts_clone,
                                                 reason: format!(
-                                                    "V5 PURE RUST Math Engine: {:.2}% Confidence",
+                                                    "V5 NDARRAY: {:.2}%",
                                                     confidence * 100.0
                                                 ),
                                             };
-
                                             let mut s_buf = BytesMut::with_capacity(256);
                                             if signal.encode(&mut s_buf).is_ok() {
                                                 let _ = nats_pub
@@ -512,26 +455,17 @@ async fn main() -> Result<()> {
                                                         s_buf.split().freeze(),
                                                     )
                                                     .await;
-                                                info!(
-                                                    "🎯 [MATH-SIGNAL] {} -> {:?} (Conf: {:.2})",
-                                                    sym_clone, signal_type, confidence
-                                                );
                                             }
                                         }
                                     }
-                                    Ok(Err(_)) => {
-                                        // Spawn blocking thread error
-                                    }
-                                    Err(_) => {
-                                        warn!("⏳ [SLA-BREACH] Math inference exceeded {}ms! Falling back to HOLD.", ai_timeout_ms);
-                                    }
+                                    Ok(Err(_)) => {}
+                                    Err(_) => warn!("⏳ [SLA-BREACH] AI Timeout!"),
                                 }
                             });
                         }
                     }
                 }
             }
-
             window.current_bucket.close = trade.price;
             if trade.price > window.current_bucket.high {
                 window.current_bucket.high = trade.price;
@@ -540,7 +474,6 @@ async fn main() -> Result<()> {
                 window.current_bucket.low = trade.price;
             }
             window.current_bucket.ticks += 1;
-
             if trade.is_buyer_maker {
                 window.current_bucket.sell_vol += trade.quantity;
             } else {
