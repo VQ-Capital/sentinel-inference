@@ -16,7 +16,7 @@ mod config;
 mod weights;
 
 use config::AppConfig;
-use weights::get_dna_weights;
+use weights::{get_dna_biases, get_dna_weights};
 
 pub mod sentinel_protos {
     pub mod market {
@@ -131,9 +131,12 @@ struct PureMathModel {
 impl PureMathModel {
     fn new() -> Result<Self> {
         let weights_data = get_dna_weights();
+        let biases_data = get_dna_biases();
+
         let weights =
             Array2::from_shape_vec((12, 3), weights_data).context("Weight Matrix Error")?;
-        let biases = Array1::from_vec(vec![0.5, -0.1, -0.1]);
+        let biases = Array1::from_vec(biases_data);
+
         Ok(Self { weights, biases })
     }
 
@@ -165,7 +168,7 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_env();
 
     info!(
-        "📡 Service: {} | Version: 5.3.0 (V7 MODULAR AI)",
+        "📡 Service: {} | Version: 5.3.1 (V7 DYNAMIC BIAS)",
         env!("CARGO_PKG_NAME")
     );
 
