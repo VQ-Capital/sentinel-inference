@@ -1,27 +1,26 @@
 // ========== DOSYA: sentinel-inference/src/weights.rs ==========
-// UYARI: Bu dosya sentinel-optimizer (Genetik Algoritma) tarafindan otomatik olarak degistirilir.
+// 🚀 UYARI: Bu dosya sentinel-optimizer tarafından OTOMATİK ENJEKTE EDİLMİŞTİR.
+// 🧬 FITNESS: -3.4963941822147717 | PNL: $-0.1854148429962379
 
 pub fn get_dna_weights() -> Vec<f32> {
     vec![
-        //  HOLD,    BUY,    SELL
-        -0.1610, 0.4237, -0.0568, // F0: Price Velocity (Z-Score)
-        -0.0854, 0.4707, -0.1167, // F1: Orderbook Imbalance
-        -0.0300, -0.3225, -0.0034, // F2: Neural Sentiment
-        0.0736, 0.2994, -0.2242, // F3: Chain Urgency
-        -0.5549, -0.0180, -0.2972, // F4: RSI
-        -0.5075, -0.2945, 0.4250, // F5: Volatility
-        0.4262, 0.0793, 0.0497, // F6: Taker Ratio
-        -0.5977, -0.1583, 0.2635, // F7: Intensity (Tick count)
-        0.3855, 0.4426, -0.4541, // F8: Position in Range
-        0.1753, 0.0827, 0.0175, // F9: Orderbook Depth
-        -0.4428, 0.3700, -0.2661, // F10: Time Sine (Intraday)
-        0.2433, -0.2559, 0.2440, // F11: Last Close Price
+        -1.4182767, 0.66203445, -0.6061201,
+        -0.35854304, -0.6249867, 0.74263555,
+        1.293087, 1.8325224, -1.3829694,
+        0.4005296, -0.5601527, 0.57542586,
+        -0.5121337, 1.3427036, 0.95523953,
+        -2.6058831, 0.41510788, -0.43890187,
+        -0.5492262, 0.49911255, -1.0221812,
+        0.5248923, -1.623308, -0.29827893,
+        0.48973987, -0.72532165, -1.59146,
+        -0.16104713, -0.0682603, -0.2549218,
+        -0.81860876, 1.410287, -0.8833219,
+        -1.0020703, 1.4620215, -0.639509,
     ]
 }
 
 pub fn get_dna_biases() -> Vec<f32> {
     vec![
-        // HOLD, BUY, SELL
-        0.1088, -0.1778, 0.2359,
+        0.45931056, -0.31151935, -0.43860698,
     ]
 }
