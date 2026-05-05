@@ -25,7 +25,7 @@ uuid = { version = "1.7", features = ["v4"] }
 ndarray = "0.15"
 
 # 🔥 CERRAHİ: Sistemin Tek Doğruluk Kaynağı olan Core kütüphanesi eklendi
-sentinel-core = { path = "../sentinel-core" }
+sentinel-core = { path = "sentinel-core" }
 
 [build-dependencies]
 prost-build = "0.12"
