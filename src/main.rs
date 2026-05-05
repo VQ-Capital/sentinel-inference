@@ -1,7 +1,6 @@
 // ========== DOSYA: sentinel-inference/src/main.rs ==========
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use ndarray::{Array1, Array2};
 use prost::bytes::BytesMut;
 use prost::Message;
 use qdrant_client::qdrant::{CreateCollectionBuilder, Distance, VectorParamsBuilder};
@@ -11,6 +10,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout, Duration};
 use tracing::{info, warn};
+
+// 🔥 CERRAHİ: Core kütüphanesinden saf matematik motorları import ediliyor.
+// Kod tekrarı (DRY) önlendi. Train ve Prod ortamları %100 eşitlendi.
+use sentinel_core::math::model::PureMathModel;
+use sentinel_core::math::zscore::OnlineZScore;
+use sentinel_core::types::SignalType as CoreSignalType;
 
 mod config;
 mod weights;
@@ -67,42 +72,6 @@ impl RollingWindow {
     }
 }
 
-#[derive(Clone)]
-struct OnlineZScore {
-    mean: f64,
-    variance: f64,
-    alpha: f64,
-    initialized: bool,
-}
-impl OnlineZScore {
-    fn new(window: usize) -> Self {
-        Self {
-            mean: 0.0,
-            variance: 1.0,
-            alpha: 2.0 / (window as f64 + 1.0),
-            initialized: false,
-        }
-    }
-    fn update(&mut self, mut value: f64, scale: f64) -> f64 {
-        value *= scale;
-        if !self.initialized {
-            self.mean = value;
-            self.variance = 1.0;
-            self.initialized = true;
-            return 0.0;
-        }
-        let diff = value - self.mean;
-        self.mean += self.alpha * diff;
-        self.variance = (1.0 - self.alpha) * (self.variance + self.alpha * diff * diff);
-        let std_dev = self.variance.sqrt();
-        if std_dev < 1e-6 {
-            0.0
-        } else {
-            ((value - self.mean) / std_dev).clamp(-3.0, 3.0)
-        }
-    }
-}
-
 struct SymbolNormalizer {
     z_scores: Vec<OnlineZScore>,
     vectors_collected: i32,
@@ -110,6 +79,7 @@ struct SymbolNormalizer {
 impl SymbolNormalizer {
     fn new() -> Self {
         Self {
+            // sentinel-core içindeki OnlineZScore kullanılıyor
             z_scores: vec![OnlineZScore::new(1000); 12],
             vectors_collected: 0,
         }
@@ -124,51 +94,13 @@ struct InferenceState {
     normalizers: HashMap<String, SymbolNormalizer>,
 }
 
-struct PureMathModel {
-    weights: Array2<f32>,
-    biases: Array1<f32>,
-}
-impl PureMathModel {
-    fn new() -> Result<Self> {
-        let weights_data = get_dna_weights();
-        let biases_data = get_dna_biases();
-
-        let weights =
-            Array2::from_shape_vec((12, 3), weights_data).context("Weight Matrix Error")?;
-        let biases = Array1::from_vec(biases_data);
-
-        Ok(Self { weights, biases })
-    }
-
-    fn predict(&self, features: &[f32; 12]) -> (SignalType, f64) {
-        let input = Array1::from_vec(features.to_vec());
-        let logits = input.dot(&self.weights) + &self.biases;
-        let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let exp_logits = logits.mapv(|x| (x - max_logit).exp());
-        let sum_exp = exp_logits.sum();
-        let probs = exp_logits / sum_exp;
-
-        let hold_prob = probs[0];
-        let buy_prob = probs[1];
-        let sell_prob = probs[2];
-
-        if buy_prob > hold_prob && buy_prob > sell_prob {
-            (SignalType::Buy, buy_prob as f64)
-        } else if sell_prob > hold_prob && sell_prob > buy_prob {
-            (SignalType::Sell, sell_prob as f64)
-        } else {
-            (SignalType::Hold, hold_prob as f64)
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let config = AppConfig::from_env();
 
     info!(
-        "📡 Service: {} | Version: 5.3.1 (V7 DYNAMIC BIAS)",
+        "📡 Service: {} | Version: 5.1.0 (V9 CORE-COUPLED)",
         env!("CARGO_PKG_NAME")
     );
 
@@ -201,7 +133,9 @@ async fn main() -> Result<()> {
             .await;
     }
 
-    let math_model = Arc::new(PureMathModel::new()?);
+    // sentinel-core PureMathModel
+    let math_model = Arc::new(PureMathModel::new(get_dna_weights(), get_dna_biases())?);
+
     let state = Arc::new(RwLock::new(InferenceState {
         sentiment_cache: HashMap::new(),
         orderbook_imbalance: HashMap::new(),
@@ -436,17 +370,27 @@ async fn main() -> Result<()> {
                                 .await;
 
                                 match ai_result {
-                                    Ok(Ok((signal_type, confidence))) => {
-                                        if signal_type != SignalType::Hold && confidence > min_conf
+                                    Ok(Ok(Ok((core_sig_type, confidence)))) => {
+                                        // sentinel-core tiplerinden protobuf tiplerine mapleme
+                                        let pb_sig_type = match core_sig_type {
+                                            CoreSignalType::Hold => SignalType::Hold,
+                                            CoreSignalType::Buy => SignalType::Buy,
+                                            CoreSignalType::Sell => SignalType::Sell,
+                                            CoreSignalType::StrongBuy => SignalType::StrongBuy,
+                                            CoreSignalType::StrongSell => SignalType::StrongSell,
+                                            _ => SignalType::Unspecified,
+                                        };
+
+                                        if pb_sig_type != SignalType::Hold && confidence > min_conf
                                         {
                                             let signal = TradeSignal {
                                                 symbol: sym_clone.clone(),
-                                                r#type: signal_type as i32,
+                                                r#type: pb_sig_type as i32,
                                                 confidence_score: confidence,
                                                 recommended_leverage: 1.0,
                                                 timestamp: ts_clone,
                                                 reason: format!(
-                                                    "V5 NDARRAY: {:.2}%",
+                                                    "V9 CORE-COUPLED: {:.2}%",
                                                     confidence * 100.0
                                                 ),
                                             };
@@ -461,7 +405,7 @@ async fn main() -> Result<()> {
                                             }
                                         }
                                     }
-                                    Ok(Err(_)) => {}
+                                    Ok(Ok(Err(_))) | Ok(Err(_)) => {}
                                     Err(_) => warn!("⏳ [SLA-BREACH] AI Timeout!"),
                                 }
                             });

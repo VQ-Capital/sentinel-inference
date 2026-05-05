@@ -1,7 +1,7 @@
 # ========== DOSYA: sentinel-inference/Cargo.toml ==========
 [package]
 name = "sentinel-inference"
-version = "5.0.0"
+version = "5.1.0"
 edition = "2021"
 description = "VQ-Capital V5 Pure Rust Omniscience Engine (12D/ndarray)"
 
@@ -21,8 +21,11 @@ futures-util = "0.3"
 qdrant-client = "1.10"
 uuid = { version = "1.7", features = ["v4"] }
 
-# 🚀 V5 PURE RUST ML ENTEGRASYONU (C++ BINDING YOK)
+# 🚀 V5 PURE RUST ML ENTEGRASYONU
 ndarray = "0.15"
+
+# 🔥 CERRAHİ: Sistemin Tek Doğruluk Kaynağı olan Core kütüphanesi eklendi
+sentinel-core = { path = "../sentinel-core" }
 
 [build-dependencies]
 prost-build = "0.12"
