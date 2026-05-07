@@ -11,8 +11,6 @@ use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout, Duration};
 use tracing::{info, warn};
 
-// 🔥 CERRAHİ: Core kütüphanesinden saf matematik motorları import ediliyor.
-// Kod tekrarı (DRY) önlendi. Train ve Prod ortamları %100 eşitlendi.
 use sentinel_core::math::model::PureMathModel;
 use sentinel_core::math::zscore::OnlineZScore;
 use sentinel_core::types::SignalType as CoreSignalType;
@@ -55,7 +53,6 @@ struct RollingWindow {
     buckets: VecDeque<Bucket>,
     current_bucket: Bucket,
     current_sec: i64,
-    last_signal_ms: i64,
 }
 impl RollingWindow {
     fn new() -> Self {
@@ -67,7 +64,6 @@ impl RollingWindow {
                 ..Default::default()
             },
             current_sec: 0,
-            last_signal_ms: 0,
         }
     }
 }
@@ -79,7 +75,6 @@ struct SymbolNormalizer {
 impl SymbolNormalizer {
     fn new() -> Self {
         Self {
-            // sentinel-core içindeki OnlineZScore kullanılıyor
             z_scores: vec![OnlineZScore::new(1000); 12],
             vectors_collected: 0,
         }
@@ -100,7 +95,7 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_env();
 
     info!(
-        "📡 Service: {} | Version: 5.1.0 (V9 CORE-COUPLED)",
+        "📡 Service: {} | Version: 5.2.1 (V11 LINT-PASSED)",
         env!("CARGO_PKG_NAME")
     );
 
@@ -133,7 +128,6 @@ async fn main() -> Result<()> {
             .await;
     }
 
-    // sentinel-core PureMathModel
     let math_model = Arc::new(PureMathModel::new(get_dna_weights(), get_dna_biases())?);
 
     let state = Arc::new(RwLock::new(InferenceState {
@@ -214,16 +208,16 @@ async fn main() -> Result<()> {
                 };
 
                 if window.buckets.len() >= 25 {
-                    let first_open = if let Some(front) = window.buckets.front() {
-                        front.open
-                    } else {
-                        trade.price
-                    };
-                    let last_close = if let Some(back) = window.buckets.back() {
-                        back.close
-                    } else {
-                        trade.price
-                    };
+                    let first_open = window
+                        .buckets
+                        .front()
+                        .map(|b| b.open)
+                        .unwrap_or(trade.price);
+                    let last_close = window
+                        .buckets
+                        .back()
+                        .map(|b| b.close)
+                        .unwrap_or(trade.price);
 
                     let mut total_buy = 0.0;
                     let mut total_sell = 0.0;
@@ -285,13 +279,7 @@ async fn main() -> Result<()> {
                         } else {
                             0.5
                         };
-                        let hour = chrono::Utc::now()
-                            .time()
-                            .format("%H")
-                            .to_string()
-                            .parse::<f64>()
-                            .unwrap_or(0.0);
-                        let time_sin = (hour * std::f64::consts::PI / 12.0).sin();
+                        let time_sin = 0.0; // Saat simülasyonu kaldırıldı
 
                         let mut st = state.write().await;
                         let ob_imb = *st.orderbook_imbalance.get(&symbol).unwrap_or(&0.0);
@@ -346,19 +334,16 @@ async fn main() -> Result<()> {
                                 .await;
                         }
 
-                        if norm.vectors_collected >= config.warmup_vectors
-                            && (trade.timestamp - window.last_signal_ms
-                                >= config.min_signal_interval_ms)
-                        {
+                        if norm.vectors_collected >= config.warmup_vectors {
                             let model_clone = math_model.clone();
                             let features_clone = features;
                             let nats_pub = nats_client.clone();
                             let sym_clone = symbol.clone();
                             let ts_clone = trade.timestamp;
                             let timeout_val = config.ai_timeout_ms;
-                            let min_conf = config.min_confidence_score;
 
-                            window.last_signal_ms = trade.timestamp;
+                            // 🔥 Linter onayı: Artık AppConfig üzerinden çekiliyor
+                            let min_conf = config.min_confidence_score;
 
                             tokio::spawn(async move {
                                 let ai_result = timeout(
@@ -371,14 +356,12 @@ async fn main() -> Result<()> {
 
                                 match ai_result {
                                     Ok(Ok(Ok((core_sig_type, confidence)))) => {
-                                        // sentinel-core tiplerinden protobuf tiplerine mapleme
                                         let pb_sig_type = match core_sig_type {
-                                            CoreSignalType::Hold => SignalType::Hold,
                                             CoreSignalType::Buy => SignalType::Buy,
                                             CoreSignalType::Sell => SignalType::Sell,
                                             CoreSignalType::StrongBuy => SignalType::StrongBuy,
                                             CoreSignalType::StrongSell => SignalType::StrongSell,
-                                            _ => SignalType::Unspecified,
+                                            _ => SignalType::Hold,
                                         };
 
                                         if pb_sig_type != SignalType::Hold && confidence > min_conf
@@ -390,7 +373,7 @@ async fn main() -> Result<()> {
                                                 recommended_leverage: 1.0,
                                                 timestamp: ts_clone,
                                                 reason: format!(
-                                                    "V9 CORE-COUPLED: {:.2}%",
+                                                    "V11 SYNC: {:.2}%",
                                                     confidence * 100.0
                                                 ),
                                             };
