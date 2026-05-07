@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_env();
 
     info!(
-        "📡 Service: {} | Version: 5.2.1 (V11 LINT-PASSED)",
+        "📡 Service: {} | Version: 5.2.2 (V12 CONFIG-SYNC)",
         env!("CARGO_PKG_NAME")
     );
 
@@ -373,7 +373,7 @@ async fn main() -> Result<()> {
                                                 recommended_leverage: 1.0,
                                                 timestamp: ts_clone,
                                                 reason: format!(
-                                                    "V11 SYNC: {:.2}%",
+                                                    "V12 SYNC: {:.2}%",
                                                     confidence * 100.0
                                                 ),
                                             };
