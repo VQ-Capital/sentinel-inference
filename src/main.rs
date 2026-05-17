@@ -19,7 +19,7 @@ mod config;
 mod weights;
 
 use config::AppConfig;
-use weights::{get_dna_biases, get_dna_weights};
+use weights::{get_dna_w1, get_dna_b1, get_dna_w2, get_dna_b2};
 
 pub mod sentinel_protos {
     pub mod market {
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_env();
 
     info!(
-        "📡 Service: {} | Version: 5.2.2 (V12 CONFIG-SYNC)",
+        "📡 Service: {} | Version: 6.0.0 (V13 MLP NON-LINEAR SYNC)",
         env!("CARGO_PKG_NAME")
     );
 
@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
             .await;
     }
 
-    let math_model = Arc::new(PureMathModel::new(get_dna_weights(), get_dna_biases())?);
+    let math_model = Arc::new(PureMathModel::new(get_dna_w1(), get_dna_b1(), get_dna_w2(), get_dna_b2())?);
 
     let state = Arc::new(RwLock::new(InferenceState {
         sentiment_cache: HashMap::new(),
@@ -279,7 +279,7 @@ async fn main() -> Result<()> {
                         } else {
                             0.5
                         };
-                        let time_sin = 0.0; // Saat simülasyonu kaldırıldı
+                        let time_sin = 0.0;
 
                         let mut st = state.write().await;
                         let ob_imb = *st.orderbook_imbalance.get(&symbol).unwrap_or(&0.0);
@@ -341,8 +341,6 @@ async fn main() -> Result<()> {
                             let sym_clone = symbol.clone();
                             let ts_clone = trade.timestamp;
                             let timeout_val = config.ai_timeout_ms;
-
-                            // 🔥 Linter onayı: Artık AppConfig üzerinden çekiliyor
                             let min_conf = config.min_confidence_score;
 
                             tokio::spawn(async move {
@@ -373,7 +371,7 @@ async fn main() -> Result<()> {
                                                 recommended_leverage: 1.0,
                                                 timestamp: ts_clone,
                                                 reason: format!(
-                                                    "V12 SYNC: {:.2}%",
+                                                    "V13 MLP SYNC: {:.2}%",
                                                     confidence * 100.0
                                                 ),
                                             };
