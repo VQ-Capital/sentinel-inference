@@ -19,7 +19,7 @@ mod config;
 mod weights;
 
 use config::AppConfig;
-use weights::{get_dna_w1, get_dna_b1, get_dna_w2, get_dna_b2};
+use weights::{get_dna_b1, get_dna_b2, get_dna_w1, get_dna_w2};
 
 pub mod sentinel_protos {
     pub mod market {
@@ -128,7 +128,12 @@ async fn main() -> Result<()> {
             .await;
     }
 
-    let math_model = Arc::new(PureMathModel::new(get_dna_w1(), get_dna_b1(), get_dna_w2(), get_dna_b2())?);
+    let math_model = Arc::new(PureMathModel::new(
+        get_dna_w1(),
+        get_dna_b1(),
+        get_dna_w2(),
+        get_dna_b2(),
+    )?);
 
     let state = Arc::new(RwLock::new(InferenceState {
         sentiment_cache: HashMap::new(),
