@@ -8,7 +8,6 @@ pub struct AppConfig {
     pub warmup_vectors: i32,
     pub z_scale: f64,
     pub ai_timeout_ms: u64,
-    pub min_confidence_score: f64,
 }
 
 impl AppConfig {
@@ -36,10 +35,6 @@ impl AppConfig {
                 .unwrap_or_else(|_| "25".to_string())
                 .parse()
                 .expect("ENV ERROR: AI_TIMEOUT_MS"),
-            min_confidence_score: std::env::var("MIN_CONFIDENCE_SCORE")
-                .unwrap_or_else(|_| "0.42".to_string())
-                .parse()
-                .expect("ENV ERROR: MIN_CONFIDENCE_SCORE"),
         }
     }
 }

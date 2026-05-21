@@ -11,15 +11,14 @@ use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout, Duration};
 use tracing::{info, warn};
 
+// 🧬 SİSTEMİN TEK DOĞRULUK KAYNAĞI (SSOT) EKLENDİ
+use sentinel_core::dna;
 use sentinel_core::math::model::PureMathModel;
 use sentinel_core::math::zscore::OnlineZScore;
 use sentinel_core::types::SignalType as CoreSignalType;
 
 mod config;
-mod weights;
-
 use config::AppConfig;
-use weights::{get_dna_b1, get_dna_b2, get_dna_w1, get_dna_w2};
 
 pub mod sentinel_protos {
     pub mod market {
@@ -95,7 +94,7 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_env();
 
     info!(
-        "📡 Service: {} | Version: 6.0.0 (V13 MLP NON-LINEAR SYNC)",
+        "📡 Service: {} | Version: 6.1.0 (V14 SINGULARITY SSOT ENGINE)",
         env!("CARGO_PKG_NAME")
     );
 
@@ -128,12 +127,8 @@ async fn main() -> Result<()> {
             .await;
     }
 
-    let math_model = Arc::new(PureMathModel::new(
-        get_dna_w1(),
-        get_dna_b1(),
-        get_dna_w2(),
-        get_dna_b2(),
-    )?);
+    // 🚀 CERRAHİ: Baked DNA'dan Modeli Çek (Split-Brain Çözümü)
+    let math_model = Arc::new(PureMathModel::new_baked().context("DNA Yükleme Hatası")?);
 
     let state = Arc::new(RwLock::new(InferenceState {
         sentiment_cache: HashMap::new(),
@@ -346,7 +341,9 @@ async fn main() -> Result<()> {
                             let sym_clone = symbol.clone();
                             let ts_clone = trade.timestamp;
                             let timeout_val = config.ai_timeout_ms;
-                            let min_conf = config.min_confidence_score;
+
+                            // 🔥 CERRAHİ: Sınır değerini doğrudan SSOT DNA'dan çekiyoruz!
+                            let min_conf = dna::MIN_CONFIDENCE;
 
                             tokio::spawn(async move {
                                 let ai_result = timeout(
@@ -367,6 +364,7 @@ async fn main() -> Result<()> {
                                             _ => SignalType::Hold,
                                         };
 
+                                        // 🔥 GÜVEN SKORU KONTROLÜ (DNA Referanslı)
                                         if pb_sig_type != SignalType::Hold && confidence > min_conf
                                         {
                                             let signal = TradeSignal {
@@ -376,7 +374,7 @@ async fn main() -> Result<()> {
                                                 recommended_leverage: 1.0,
                                                 timestamp: ts_clone,
                                                 reason: format!(
-                                                    "V13 MLP SYNC: {:.2}%",
+                                                    "V14 SINGULARITY: {:.2}%",
                                                     confidence * 100.0
                                                 ),
                                             };
