@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_env();
 
     info!(
-        "📡 Service: {} | Version: 6.1.0 (V14 SINGULARITY SSOT ENGINE)",
+        "📡 Service: {} | Version: 6.2.0 (V15 SINGULARITY SSOT & MATH SYNC)",
         env!("CARGO_PKG_NAME")
     );
 
@@ -227,11 +227,13 @@ async fn main() -> Result<()> {
                     let mut gains = 0.0;
                     let mut losses = 0.0;
                     let mut prev_close = first_open;
+                    let mut sum_price = 0.0; // 🔥 YENİ: Ortalama fiyat için
 
                     for b in window.buckets.iter() {
                         total_buy += b.buy_vol;
                         total_sell += b.sell_vol;
                         total_ticks += b.ticks;
+                        sum_price += b.close; // 🔥 YENİ
                         if b.high > highest {
                             highest = b.high;
                         }
@@ -279,11 +281,16 @@ async fn main() -> Result<()> {
                         } else {
                             0.5
                         };
-                        let time_sin = 0.0;
+
+                        // 🔥 CERRAHİ DÜZELTME: Simülatör (Optimizer) Matematiği ile Birebir Eşitlendi
+                        let hour = ((trade.timestamp / 3600000) % 24) as f64;
+                        let time_sin = (hour * std::f64::consts::PI / 12.0).sin();
+                        let avg_price = sum_price / window.buckets.len() as f64;
+                        let price_to_mean = (last_close - avg_price) / avg_price;
 
                         let mut st = state.write().await;
                         let ob_imb = *st.orderbook_imbalance.get(&symbol).unwrap_or(&0.0);
-                        let ob_depth = *st.orderbook_depth.get(&symbol).unwrap_or(&1.0);
+
                         let (sent, sent_ts) = *st.sentiment_cache.get(&symbol).unwrap_or(&(0.0, 0));
                         let sentiment = if sent_ts > 0 && (trade.timestamp - sent_ts) < 14400000 {
                             sent
@@ -309,9 +316,9 @@ async fn main() -> Result<()> {
                         features[6] = norm.z_scores[6].update(taker_ratio, 1.0) as f32;
                         features[7] = norm.z_scores[7].update(intensity, 1.0) as f32;
                         features[8] = norm.z_scores[8].update(position_in_range, 1.0) as f32;
-                        features[9] = norm.z_scores[9].update(ob_depth, 1.0) as f32;
-                        features[10] = norm.z_scores[10].update(time_sin, 1.0) as f32;
-                        features[11] = norm.z_scores[11].update(last_close, 1.0) as f32;
+                        features[9] = norm.z_scores[9].update(total_buy + total_sell, 1.0) as f32; // 🔥 ob_depth yerine hacim
+                        features[10] = norm.z_scores[10].update(time_sin, 1.0) as f32; // 🔥 Gerçek Zaman Dalgası
+                        features[11] = norm.z_scores[11].update(price_to_mean, 1000.0) as f32; // 🔥 Fiyata Ortalamadan Uzaklık
 
                         let state_msg = MarketStateVector {
                             symbol: symbol.clone(),
@@ -364,17 +371,16 @@ async fn main() -> Result<()> {
                                             _ => SignalType::Hold,
                                         };
 
-                                        // 🔥 GÜVEN SKORU KONTROLÜ (DNA Referanslı)
                                         if pb_sig_type != SignalType::Hold && confidence > min_conf
                                         {
                                             let signal = TradeSignal {
                                                 symbol: sym_clone.clone(),
                                                 r#type: pb_sig_type as i32,
                                                 confidence_score: confidence,
-                                                recommended_leverage: 1.0,
+                                                recommended_leverage: dna::LEVERAGE, // 🔥 SSOT'dan gelen kaldıraç
                                                 timestamp: ts_clone,
                                                 reason: format!(
-                                                    "V14 SINGULARITY: {:.2}%",
+                                                    "V15 SINGULARITY: {:.2}%",
                                                     confidence * 100.0
                                                 ),
                                             };
